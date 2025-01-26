@@ -5,7 +5,7 @@
 
 **Early Stage Project**: ⚠️ This package is under active development. The library may change as we improve the implementation. ⚠️
 
-A Zig implementation of [TweetNaCl](https://tweetnacl.cr.yp.to/), following the API surface of TweetNaCl.js. A minimal cryptographic library for modern applications, providing essential cryptographic primitives in a compact, auditable form.
+A Zig implementation of [TweetNaCl](https://tweetnacl.cr.yp.to/), maintaining **API compatibility** with [TweetNaCl.js](https://github.com/dchest/tweetnacl-js). A minimal cryptographic library for modern applications, providing essential cryptographic primitives in a compact, auditable form.
 
 ## Features
 
