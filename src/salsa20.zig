@@ -96,6 +96,47 @@ pub fn hsalsa20(out: []u8, input: []const u8, key: []const u8) void {
     core(out, input, key, &sigma, true);
 }
 
+/// Salsa20 in XOR mode (for direct use by XSalsa20)
+pub fn salsa20Xor(
+    out: []u8,
+    msg: []const u8,
+    nonce: []const u8, // 8 bytes
+    key: []const u8, // 32 bytes
+) void {
+    std.debug.assert(nonce.len == 8); // 64-bit nonce
+    std.debug.assert(key.len == 32); // 256-bit key
+    std.debug.assert(out.len == msg.len); // Output matches input
+
+    var counter: [16]u8 = undefined;
+    var block: [64]u8 = undefined;
+    var full_nonce: [16]u8 = undefined;
+
+    // Counter is zero-initialized, nonce occupies last 8 bytes
+    @memcpy(counter[8..16], nonce);
+    @memcpy(full_nonce[0..8], nonce);
+
+    var offset: usize = 0;
+    while (offset < msg.len) {
+        // Generate key stream block
+        salsa20(&block, &full_nonce, key);
+
+        // XOR with message
+        const end = @min(offset + 64, msg.len);
+        for (offset..end) |i| {
+            out[i] = msg[i] ^ block[i - offset];
+        }
+
+        // Increment counter (little-endian)
+        var i: usize = 0;
+        while (i < 8) : (i += 1) {
+            counter[i] += 1;
+            if (counter[i] != 0) break;
+        }
+
+        offset += 64;
+    }
+}
+
 test "Salsa20 Core Test Vector" {
     const key = [_]u8{0} ** 32;
     const input = [_]u8{0} ** 16;
@@ -116,4 +157,60 @@ test "HSalsa20 Test Vector" {
 
     const expected = "1B27556473E985D462CD51197A9A46C76009549EAC6474F206C4EE0844F68389".*;
     try std.testing.expectEqualSlices(u8, &expected, &out);
+}
+
+// src/xsalsa20.zig (additional test)
+
+test "XSalsa20 Complete Usage Example" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    // --- Test Configuration ---
+    const original_msg = "Hello, Zig! Secured with XSalsa20";
+    const key = [_]u8{
+        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+        0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
+        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+        0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
+    };
+    const nonce = [_]u8{
+        0xca, 0xfe, 0xba, 0xbe, 0xde, 0xad, 0xbe, 0xef,
+        0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0,
+        0x24, 0x68, 0x13, 0x57, 0x9b, 0xdf, 0x27, 0x5a,
+    };
+
+    // --- Buffers ---
+    const ciphertext = try allocator.alloc(u8, original_msg.len);
+    defer allocator.free(ciphertext);
+    const decrypted = try allocator.alloc(u8, original_msg.len);
+    defer allocator.free(decrypted);
+
+    // --- Encryption ---
+    salsa20Xor(ciphertext, original_msg, &nonce, &key);
+
+    // Print results
+    std.debug.print("\nOriginal: {s}\n", .{original_msg});
+    std.debug.print("Ciphertext (hex): {s}\n", .{
+        std.fmt.fmtSliceHexLower(ciphertext),
+    });
+
+    // --- Decryption ---
+    salsa20Xor(decrypted, ciphertext, &nonce, &key);
+    std.debug.print("Decrypted: {s}\n\n", .{decrypted});
+
+    // --- Verification ---
+    try std.testing.expectEqualSlices(u8, original_msg, decrypted);
+
+    // --- Known Answer Test ---
+    const expected_cipher = [_]u8{
+        0x45, 0x3d, 0x80, 0x4e, 0x2b, 0x8d, 0x1c, 0xab,
+        0x6d, 0x79, 0x1f, 0xbe, 0x9c, 0x9f, 0x30, 0x4c,
+        0x5e, 0x24, 0x47, 0x9f, 0x8d, 0x95, 0x0d, 0x54,
+        0x42, 0xbd, 0x23, 0x4d, 0x05, 0x3a, 0x6a, 0xae,
+    };
+    try std.testing.expectEqualSlices(
+        u8,
+        &expected_cipher,
+        ciphertext[0..expected_cipher.len],
+    );
 }

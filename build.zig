@@ -39,9 +39,24 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(example_salsa20);
 
     // Add run step for salsa20_demo
-    const run_cmd = b.addRunArtifact(example_salsa20);
-    const run_step = b.step("salsa20_demo", "Run the salsa20 demo");
-    run_step.dependOn(&run_cmd.step);
+    const run_cmd_salsa20 = b.addRunArtifact(example_salsa20);
+    const run_step_salsa20 = b.step("salsa20_demo", "Run the salsa20 demo");
+    run_step_salsa20.dependOn(&run_cmd_salsa20.step);
+
+    // Execute the example for xsalsa20
+    const example_xsalsa20 = b.addExecutable(.{
+        .name = "xsalsa20_demo",
+        .root_source_file = b.path("examples/xsalsa20_demo.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    example_xsalsa20.root_module.addImport("tweetnacl-zig", tweetnacl_mod);
+    b.installArtifact(example_xsalsa20);
+
+    // Add run step for xsalsa20_demo
+    const run_cmd_xsalsa20 = b.addRunArtifact(example_xsalsa20);
+    const run_step_xsalsa20 = b.step("xsalsa20_demo", "Run the xsalsa20 demo");
+    run_step_xsalsa20.dependOn(&run_cmd_xsalsa20.step);
 
     // Consolidate test creation into a helper function
     const lib_unit_tests = addTest(b, "src/root.zig", target, optimize);
