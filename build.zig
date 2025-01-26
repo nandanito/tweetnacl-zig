@@ -24,6 +24,11 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // Create a module
+    const tweetnacl_mod = b.addModule("tweetnacl-zig", .{
+        .root_source_file = b.path("src/root.zig"),
+    });
+
     // This declares intent for the library to be installed into the standard
     // location when the user invokes the "install" step (the default step when
     // running `zig build`).
@@ -57,6 +62,23 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| {
         run_cmd.addArgs(args);
     }
+
+    // Execute the example
+    const example_salsa20 = b.addExecutable(.{
+        .name = "salsa20_demo",
+        .root_source_file = b.path("examples/salsa20_demo.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    example_salsa20.root_module.addImport("tweetnacl-zig", tweetnacl_mod);
+    // example_salsa20.linkLibrary(lib);
+    b.installArtifact(example_salsa20);
+    const run_example = b.addRunArtifact(example_salsa20);
+    run_example.step.dependOn(b.getInstallStep());
+
+    // Add a dedicated step for running the salsa20 demo
+    const run_salsa20_step = b.step("salsa20_demo", "Run the Salsa20 demo");
+    run_salsa20_step.dependOn(&run_example.step);
 
     // This creates a build step. It will be visible in the `zig build --help` menu,
     // and can be selected like this: `zig build run`

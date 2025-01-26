@@ -106,7 +106,7 @@ pub fn key_exchange() !void {
 
 ## Current Status
 
-- [ ] Salsa20 core functions
+- [x] Salsa20 core functions
 - [ ] Poly1305 MAC
 - [ ] SecretBox API (XSalsa20+Poly1305)
 - [ ] Box API (Curve25519 key exchange)
