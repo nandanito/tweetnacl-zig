@@ -15,35 +15,40 @@ implementation suitable for study and audit. Consequently:
 
 ## Two tiers
 
-**High-level API** (roadmap) — what applications should use:
+**High-level API** — what applications should use:
 
-| Namespace   | Primitive                                              |
-|-------------|--------------------------------------------------------|
-| `secretbox` | XSalsa20-Poly1305 authenticated encryption (symmetric) |
-| `box`       | Curve25519-XSalsa20-Poly1305 authenticated encryption (public-key) |
-| `sign`      | Ed25519 signatures                                     |
-| `hash`      | SHA-512                                                |
+| Namespace   | Primitive                                              | Status   |
+|-------------|--------------------------------------------------------|----------|
+| `secretbox` | XSalsa20-Poly1305 authenticated encryption (symmetric) | ✅       |
+| `box`       | Curve25519-XSalsa20-Poly1305 authenticated encryption (public-key) | roadmap |
+| `sign`      | Ed25519 signatures                                     | roadmap  |
+| `hash`      | SHA-512                                                | roadmap  |
 
 **Low-level API** (`lowlevel`) — building blocks for advanced use:
 
-| Module                | Contents                              |
-|-----------------------|---------------------------------------|
-| `lowlevel.salsa20`    | `core`, `hsalsa20`, `stream`          |
-| `lowlevel.xsalsa20`   | `stream`                              |
-| `lowlevel.poly1305`   | one-time MAC *(roadmap)*              |
-| `lowlevel.scalarmult` | Curve25519 / X25519 *(roadmap)*       |
+| Module                | Contents                              | Status   |
+|-----------------------|---------------------------------------|----------|
+| `lowlevel.salsa20`    | `core`, `hsalsa20`, `stream`          | ✅       |
+| `lowlevel.xsalsa20`   | `stream`                              | ✅       |
+| `lowlevel.poly1305`   | `auth`, `verify` (one-time MAC)       | ✅       |
+| `lowlevel.scalarmult` | Curve25519 / X25519                   | roadmap  |
 
 Each primitive composes the one below it:
 
 ```
 xsalsa20.stream = salsa20.hsalsa20 (subkey) + salsa20.stream
-secretbox       = xsalsa20.stream + poly1305          (roadmap)
+secretbox       = XSalsa20 keystream + poly1305
 box             = scalarmult + secretbox              (roadmap)
 ```
 
 Inside `salsa20.zig`, a single `permute` (the 20-round column/row permutation)
 is shared by `core` (64-byte block — adds the initial state back) and
 `hsalsa20` (32-byte subkey — selects words of the final state, no addition).
+
+`secretbox` derives a one-time Poly1305 key from the first 32 bytes of the
+XSalsa20 keystream; the message itself is encrypted with the keystream from
+byte 32 onward. `open` verifies the tag in constant time and returns
+`error.AuthFailed` *before* writing any plaintext.
 
 ## API conventions
 
@@ -60,8 +65,8 @@ These rules are binding for every primitive:
    `error{AuthFailed}`, never a silent wrong result.
 5. **Constant-time** — no secret-dependent branches or memory indexing; tag
    comparison uses `std.crypto.timing_safe`.
-6. **Secret hygiene** — stack-resident secret material (subkeys, expanded keys)
-   is wiped with `std.crypto.secureZero` before return.
+6. **Secret hygiene** — stack-resident secret material (subkeys, expanded keys,
+   keystream state) is wiped with `std.crypto.secureZero` before return.
 7. **Explicit endianness** — all integer encoding is little-endian via
    `std.mem.readInt` / `writeInt`.
 8. **No `assert` for validation** — `std.debug.assert` is only a debug aid (it
@@ -73,7 +78,7 @@ These rules are binding for every primitive:
 The contract is **byte-for-byte interoperability** with TweetNaCl and
 tweetnacl-js: identical ciphertext, signatures, keys, and nonces. The NaCl
 zero-padding convention (`ZEROBYTES` / `BOXZEROBYTES`) is an internal
-implementation detail and is hidden from callers — `secretbox` output will be a
+implementation detail and is hidden from callers — `secretbox` output is a
 16-byte authentication tag followed by the ciphertext, exactly as tweetnacl-js
 produces it.
 
@@ -84,10 +89,12 @@ not a transliteration of the JavaScript or C signatures.
 
 ```
 src/
-  root.zig       Public API surface
+  root.zig       Public API surface (secretbox + lowlevel)
+  secretbox.zig  XSalsa20-Poly1305 authenticated encryption
   lowlevel.zig   Aggregator for the low-level namespace
   salsa20.zig    Salsa20 / HSalsa20 core + Salsa20 stream cipher
   xsalsa20.zig   XSalsa20 stream cipher
+  poly1305.zig   Poly1305 one-time MAC
 build.zig        Zig 0.16 build: static library, test step, example runners
 examples/        One runnable, commented program per usable primitive
 ```
@@ -99,10 +106,11 @@ graph into `zig build test`.
 
 ## Security properties and current limitations
 
-- Salsa20 has no secret-dependent branches or table lookups; it is
-  constant-time by construction.
+- Salsa20 and Poly1305 have no secret-dependent branches or table lookups; they
+  are constant-time by construction. `secretbox.open` compares tags with
+  `std.crypto.timing_safe`.
 - **The `lowlevel` stream ciphers provide confidentiality only.** They do not
   authenticate; ciphertext malleability is expected and is the caller's
-  responsibility until `secretbox` lands.
-- The library is early-stage and unaudited. Until a high-level authenticated
-  API ships and is reviewed, prefer `std.crypto` for production use.
+  responsibility. Use `secretbox` for authenticated encryption.
+- The library is early-stage and unaudited. Prefer `std.crypto` for production
+  use.
