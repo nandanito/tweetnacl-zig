@@ -1,0 +1,32 @@
+name: Primitive or feature task
+description: Track implementation of a cryptographic primitive or a feature.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What should be built, and where does it sit in the architecture? See ARCHITECTURE.md.
+    validations:
+      required: true
+  - type: textarea
+    id: tasks
+    attributes:
+      label: Tasks
+      description: A checklist of the work.
+      value: |
+        - [ ] Implementation
+        - [ ] Official known-answer test(s)
+        - [ ] Differential test against `std.crypto`
+        - [ ] Negative / edge-case tests
+        - [ ] Green in all four optimize modes
+    validations:
+      required: true
+  - type: textarea
+    id: dod
+    attributes:
+      label: Definition of done
+      value: |
+        Meets the test-coverage bar in CONTRIBUTING.md.
+    validations:
+      required: true

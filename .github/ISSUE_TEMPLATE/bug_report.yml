@@ -1,0 +1,40 @@
+name: Bug report
+description: Report incorrect behaviour, a crash, or a wrong cryptographic result.
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you observe, and what did you expect instead?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: Minimal code or steps. Name the primitive involved (e.g. `secretbox`, `lowlevel.poly1305`).
+      render: zig
+    validations:
+      required: true
+  - type: input
+    id: zig
+    attributes:
+      label: Zig version
+      description: Output of `zig version`.
+      placeholder: "0.16.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: optimize
+    attributes:
+      label: Optimize mode
+      description: Which build mode(s) show the problem?
+      options:
+        - Debug
+        - ReleaseSafe
+        - ReleaseFast
+        - ReleaseSmall
+        - Multiple / not sure
+    validations:
+      required: true
