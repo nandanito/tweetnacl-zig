@@ -13,6 +13,10 @@
 //! keys, derive the shared key once and reuse it via `sealAfternm` /
 //! `openAfternm` — this skips the scalar multiplication on every message.
 //!
+//! A low-order ("weak") public key would collapse the shared key to a fixed,
+//! publicly-known value; `beforenm` / `seal` / `open` reject one with
+//! `error.WeakPublicKey` before deriving anything.
+//!
 //! As with `secretbox`, a `(key, nonce)` pair must never be reused; the
 //! 24-byte nonce is large enough to be chosen at random.
 const std = @import("std");
@@ -30,6 +34,13 @@ pub const shared_key_length = 32;
 pub const nonce_length = 24;
 /// Size difference between a sealed box and its plaintext (the tag length).
 pub const overhead = secretbox.overhead;
+
+/// Returned when a public key is a low-order Curve25519 point. Scalar
+/// multiplication with such a key collapses to the all-zero output regardless
+/// of the secret scalar, which would derive a fixed, publicly-known shared
+/// key — so `beforenm`, `seal` and `open` reject it. (libsodium and
+/// `std.crypto.nacl.Box` reject this case too; TweetNaCl itself does not.)
+pub const WeakPublicKeyError = error{WeakPublicKey};
 
 /// HSalsa20 is keyed with a 16-byte all-zero nonce when hashing the raw X25519
 /// output into the shared key (NaCl's `crypto_box_beforenm`).
@@ -69,16 +80,27 @@ pub fn keyPair(io: std.Io) KeyPair {
 /// Both parties of a conversation arrive at the same shared key — sender from
 /// `(recipient_public, sender_secret)`, recipient from `(sender_public,
 /// recipient_secret)`. Reuse it with `sealAfternm` / `openAfternm`.
+///
+/// Returns `error.WeakPublicKey` if `public_key` is a low-order point.
 pub fn beforenm(
     shared_key: *[shared_key_length]u8,
     public_key: *const [public_key_length]u8,
     secret_key: *const [secret_key_length]u8,
-) void {
+) WeakPublicKeyError!void {
     // X25519 Diffie-Hellman, then HSalsa20 to whiten the raw curve point into
     // a uniformly-distributed symmetric key.
     var dh: [32]u8 = undefined;
     defer std.crypto.secureZero(u8, &dh);
     scalarmult.scalarmult(&dh, secret_key, public_key);
+
+    // A low-order public key forces the X25519 output to all-zero whatever the
+    // secret scalar is; hashing that would yield a fixed, publicly-known
+    // shared key. Reject it before deriving anything. The OR-reduce keeps the
+    // lone branch off any secret — the outcome depends only on `public_key`.
+    var nonzero: u8 = 0;
+    for (dh) |b| nonzero |= b;
+    if (nonzero == 0) return error.WeakPublicKey;
+
     salsa20.hsalsa20(shared_key, &zero_nonce, &dh);
 }
 
@@ -111,16 +133,19 @@ pub fn openAfternm(
 /// Encrypts and authenticates `msg` for `recipient_public_key`, from the
 /// holder of `sender_secret_key`. Writes `msg.len + overhead` bytes to `out`:
 /// a 16-byte tag followed by ciphertext.
+///
+/// Returns `error.WeakPublicKey` — without writing `out` — if
+/// `recipient_public_key` is a low-order point.
 pub fn seal(
     out: []u8,
     msg: []const u8,
     nonce: *const [nonce_length]u8,
     recipient_public_key: *const [public_key_length]u8,
     sender_secret_key: *const [secret_key_length]u8,
-) void {
+) WeakPublicKeyError!void {
     var shared_key: [shared_key_length]u8 = undefined;
     defer std.crypto.secureZero(u8, &shared_key);
-    beforenm(&shared_key, recipient_public_key, sender_secret_key);
+    try beforenm(&shared_key, recipient_public_key, sender_secret_key);
     sealAfternm(out, msg, nonce, &shared_key);
 }
 
@@ -129,7 +154,8 @@ pub fn seal(
 /// is a 16-byte tag followed by ciphertext; `out` receives
 /// `boxed.len - overhead` plaintext bytes.
 ///
-/// Returns `error.AuthFailed` — without writing any plaintext — if
+/// Returns — without writing any plaintext — `error.WeakPublicKey` if
+/// `sender_public_key` is a low-order point, or `error.AuthFailed` if
 /// authentication fails.
 pub fn open(
     out: []u8,
@@ -137,10 +163,10 @@ pub fn open(
     nonce: *const [nonce_length]u8,
     sender_public_key: *const [public_key_length]u8,
     recipient_secret_key: *const [secret_key_length]u8,
-) error{AuthFailed}!void {
+) (WeakPublicKeyError || error{AuthFailed})!void {
     var shared_key: [shared_key_length]u8 = undefined;
     defer std.crypto.secureZero(u8, &shared_key);
-    beforenm(&shared_key, sender_public_key, recipient_secret_key);
+    try beforenm(&shared_key, sender_public_key, recipient_secret_key);
     return openAfternm(out, boxed, nonce, &shared_key);
 }
 
@@ -183,13 +209,13 @@ test "box beforenm — NaCl tests/box.c shared key (secretbox firstkey)" {
     };
 
     var shared: [32]u8 = undefined;
-    beforenm(&shared, &bob_pk, &alice_sk);
+    try beforenm(&shared, &bob_pk, &alice_sk);
     try testing.expectEqualSlices(u8, &firstkey, &shared);
 
     // The recipient derives the identical key from the opposite pair, and
     // Alice's public key is recovered from her secret key.
     const alice_pk = keyPairFromSecretKey(&alice_sk).public_key;
-    beforenm(&shared, &alice_pk, &bob_sk);
+    try beforenm(&shared, &alice_pk, &bob_sk);
     try testing.expectEqualSlices(u8, &firstkey, &shared);
 }
 
@@ -245,7 +271,7 @@ test "box seal — NaCl tests/box.c known-answer vector" {
     };
 
     var boxed: [msg.len + overhead]u8 = undefined;
-    seal(&boxed, &msg, &nonce, &bob_pk, &alice_sk);
+    try seal(&boxed, &msg, &nonce, &bob_pk, &alice_sk);
     try testing.expectEqualSlices(u8, &expected, &boxed);
 
     // And the recipient recovers the plaintext from the opposite key pair.
@@ -285,7 +311,7 @@ test "box keyPair derives the matching X25519 public key" {
     io.random(&nonce);
     const message = "generated key pairs interoperate";
     var boxed: [message.len + overhead]u8 = undefined;
-    seal(&boxed, message, &nonce, &recipient.public_key, &sender.secret_key);
+    try seal(&boxed, message, &nonce, &recipient.public_key, &sender.secret_key);
     var opened: [message.len]u8 = undefined;
     try open(&opened, &boxed, &nonce, &sender.public_key, &recipient.secret_key);
     try testing.expectEqualSlices(u8, message, &opened);
@@ -303,7 +329,7 @@ test "box beforenm matches std.crypto.nacl.Box.createSharedSecret" {
         const pk_b = keyPairFromSecretKey(&sk_b).public_key;
 
         var mine: [32]u8 = undefined;
-        beforenm(&mine, &pk_b, &sk_a);
+        try beforenm(&mine, &pk_b, &sk_a);
         const theirs = try std.crypto.nacl.Box.createSharedSecret(pk_b, sk_a);
         try testing.expectEqualSlices(u8, &theirs, &mine);
     }
@@ -329,7 +355,7 @@ test "box seal matches std.crypto.nacl.Box across sizes" {
 
             var mine: [1000 + overhead]u8 = undefined;
             var reference: [1000 + overhead]u8 = undefined;
-            seal(mine[0 .. len + overhead], msg[0..len], &nonce, &pk_b, &sk_a);
+            try seal(mine[0 .. len + overhead], msg[0..len], &nonce, &pk_b, &sk_a);
             try StdBox.seal(reference[0 .. len + overhead], msg[0..len], nonce, pk_b, sk_a);
             try testing.expectEqualSlices(u8, reference[0 .. len + overhead], mine[0 .. len + overhead]);
         }
@@ -352,7 +378,7 @@ test "box round-trips, including the afternm path" {
 
     // One-shot seal / open.
     var boxed: [300 + overhead]u8 = undefined;
-    seal(&boxed, &msg, &nonce, &pk_b, &sk_a);
+    try seal(&boxed, &msg, &nonce, &pk_b, &sk_a);
     var opened: [300]u8 = undefined;
     try open(&opened, &boxed, &nonce, &pk_a, &sk_b);
     try testing.expectEqualSlices(u8, &msg, &opened);
@@ -360,13 +386,13 @@ test "box round-trips, including the afternm path" {
     // The afternm path with a precomputed key produces an identical box and
     // opens it the same way.
     var shared: [shared_key_length]u8 = undefined;
-    beforenm(&shared, &pk_b, &sk_a);
+    try beforenm(&shared, &pk_b, &sk_a);
     var boxed_afternm: [300 + overhead]u8 = undefined;
     sealAfternm(&boxed_afternm, &msg, &nonce, &shared);
     try testing.expectEqualSlices(u8, &boxed, &boxed_afternm);
 
     var shared_recipient: [shared_key_length]u8 = undefined;
-    beforenm(&shared_recipient, &pk_a, &sk_b);
+    try beforenm(&shared_recipient, &pk_a, &sk_b);
     var opened_afternm: [300]u8 = undefined;
     try openAfternm(&opened_afternm, &boxed_afternm, &nonce, &shared_recipient);
     try testing.expectEqualSlices(u8, &msg, &opened_afternm);
@@ -396,7 +422,7 @@ test "box interoperates with std.crypto.nacl.Box both ways" {
 
     // std must accept and open what seal() produced.
     var boxed: [128 + overhead]u8 = undefined;
-    seal(&boxed, &msg, &nonce, &pk_b, &sk_a);
+    try seal(&boxed, &msg, &nonce, &pk_b, &sk_a);
     var std_opened: [128]u8 = undefined;
     try StdBox.open(&std_opened, &boxed, nonce, pk_a, sk_b);
     try testing.expectEqualSlices(u8, &msg, &std_opened);
@@ -417,7 +443,7 @@ test "box open rejects tampering" {
     const pk_b = keyPairFromSecretKey(&sk_b).public_key;
 
     var boxed: [96 + overhead]u8 = undefined;
-    seal(&boxed, &msg, &nonce, &pk_b, &sk_a);
+    try seal(&boxed, &msg, &nonce, &pk_b, &sk_a);
 
     var opened: [96]u8 = undefined;
     try open(&opened, &boxed, &nonce, &pk_a, &sk_b); // a genuine box opens
@@ -457,8 +483,58 @@ test "box open rejects tampering" {
     {
         // openAfternm with the wrong precomputed key also fails.
         var bad_shared: [shared_key_length]u8 = undefined;
-        beforenm(&bad_shared, &pk_a, &sk_b);
+        try beforenm(&bad_shared, &pk_a, &sk_b);
         bad_shared[0] ^= 0x01;
         try testing.expectError(error.AuthFailed, openAfternm(&opened, &boxed, &nonce, &bad_shared));
+    }
+}
+
+test "box rejects weak (low-order) public keys" {
+    // Scalar multiplication with any of these Curve25519 u-coordinates
+    // collapses to the all-zero output regardless of the secret scalar, so the
+    // shared key would be a fixed, publicly-known value. `beforenm`, `seal`
+    // and `open` must reject them. Set drawn from libsodium's blacklist;
+    // `std.crypto.nacl.Box` rejects this case too.
+    const weak_keys = [_][32]u8{
+        [_]u8{0} ** 32, // u = 0  (order 4)
+        [_]u8{1} ++ [_]u8{0} ** 31, // u = 1  (order 4)
+        [32]u8{ // order 8
+            0xe0, 0xeb, 0x7a, 0x7c, 0x3b, 0x41, 0xb8, 0xae,
+            0x16, 0x56, 0xe3, 0xfa, 0xf1, 0x9f, 0xc4, 0x6a,
+            0xda, 0x09, 0x8d, 0xeb, 0x9c, 0x32, 0xb1, 0xfd,
+            0x86, 0x62, 0x05, 0x16, 0x5f, 0x49, 0xb8, 0x00,
+        },
+        [32]u8{ // order 8
+            0x5f, 0x9c, 0x95, 0xbc, 0xa3, 0x50, 0x8c, 0x24,
+            0xb1, 0xd0, 0xb1, 0x55, 0x9c, 0x83, 0xef, 0x5b,
+            0x04, 0x44, 0x5c, 0xc4, 0x58, 0x1c, 0x8e, 0x86,
+            0xd8, 0x22, 0x4e, 0xdd, 0xd0, 0x9f, 0x11, 0x57,
+        },
+        [_]u8{0xec} ++ [_]u8{0xff} ** 30 ++ [_]u8{0x7f}, // p - 1  (order 2)
+    };
+
+    var prng = std.Random.DefaultPrng.init(0x0bad_b0c5_0bad_b0c5);
+    const rand = prng.random();
+    var sk: [32]u8 = undefined;
+    var nonce: [24]u8 = undefined;
+    rand.bytes(&sk);
+    rand.bytes(&nonce);
+    const valid_pk = keyPairFromSecretKey(&sk).public_key;
+    const msg = "weak public keys must be rejected";
+
+    for (weak_keys) |weak| {
+        // beforenm rejects a weak key on either side of the agreement.
+        var shared: [shared_key_length]u8 = undefined;
+        try testing.expectError(error.WeakPublicKey, beforenm(&shared, &weak, &sk));
+
+        // seal refuses to encrypt to a weak recipient key.
+        var boxed: [msg.len + overhead]u8 = undefined;
+        try testing.expectError(error.WeakPublicKey, seal(&boxed, msg, &nonce, &weak, &sk));
+
+        // open refuses a weak claimed sender key. The box itself is genuine,
+        // so the rejection is attributable to the key, not the ciphertext.
+        try seal(&boxed, msg, &nonce, &valid_pk, &sk);
+        var opened: [msg.len]u8 = undefined;
+        try testing.expectError(error.WeakPublicKey, open(&opened, &boxed, &nonce, &weak, &sk));
     }
 }

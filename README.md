@@ -94,7 +94,7 @@ const message = "attack at dawn";
 
 // Alice seals for Bob: his public key, her secret key.
 var boxed: [message.len + nacl.box.overhead]u8 = undefined;
-nacl.box.seal(&boxed, message, &nonce, &bob.public_key, &alice.secret_key);
+try nacl.box.seal(&boxed, message, &nonce, &bob.public_key, &alice.secret_key);
 
 // Bob opens it: Alice's public key, his secret key. Returns error.AuthFailed
 // — without writing any plaintext — if the box was tampered with.
@@ -103,7 +103,7 @@ try nacl.box.open(&opened, &boxed, &nonce, &alice.public_key, &bob.secret_key);
 // opened now equals message
 ```
 
-`box.keyPair(io)` draws a fresh secret key from `io`'s CSPRNG (`io` is a `std.Io`); `box.keyPairFromSecretKey(&sk)` derives a key pair deterministically from an existing 32-byte secret key. When several messages travel between the same pair of keys, derive the shared key once with `box.beforenm` and reuse it via `box.sealAfternm` / `box.openAfternm` — this skips the X25519 scalar multiplication on every message. Output is byte-for-byte identical to TweetNaCl / tweetnacl-js.
+`box.keyPair(io)` draws a fresh secret key from `io`'s CSPRNG (`io` is a `std.Io`); `box.keyPairFromSecretKey(&sk)` derives a key pair deterministically from an existing 32-byte secret key. When several messages travel between the same pair of keys, derive the shared key once with `box.beforenm` and reuse it via `box.sealAfternm` / `box.openAfternm` — this skips the X25519 scalar multiplication on every message. `beforenm`, `seal` and `open` return `error.WeakPublicKey` if a supplied public key is a low-order Curve25519 point (which would collapse the shared key to a fixed, publicly-known value). Output is byte-for-byte identical to TweetNaCl / tweetnacl-js.
 
 ### lowlevel — stream cipher and MAC
 

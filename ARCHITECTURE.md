@@ -114,5 +114,9 @@ graph into `zig build test`.
 - **The `lowlevel` stream ciphers provide confidentiality only.** They do not
   authenticate; ciphertext malleability is expected and is the caller's
   responsibility. Use `secretbox` for authenticated encryption.
+- `box` rejects low-order ("weak") public keys with `error.WeakPublicKey` — one
+  would force the X25519 output, and hence the shared key, to a fixed and
+  publicly-known value. TweetNaCl itself omits this check; rejecting a weak key
+  changes no output for valid keys, so wire compatibility is preserved.
 - The library is early-stage and unaudited. Prefer `std.crypto` for production
   use.

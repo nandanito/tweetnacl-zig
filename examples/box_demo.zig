@@ -36,9 +36,13 @@ pub fn main() void {
     };
     const message = "box: only Bob can read this, and he knows Alice sent it.";
 
-    // Alice seals for Bob: his public key, her secret key.
+    // Alice seals for Bob: his public key, her secret key. `seal` returns
+    // error.WeakPublicKey if the recipient key is a low-order point.
     var boxed: [message.len + nacl.box.overhead]u8 = undefined;
-    nacl.box.seal(&boxed, message, &nonce, &bob.public_key, &alice.secret_key);
+    nacl.box.seal(&boxed, message, &nonce, &bob.public_key, &alice.secret_key) catch {
+        std.debug.print("seal:         recipient public key is weak\n", .{});
+        return;
+    };
 
     const boxed_hex = std.fmt.bytesToHex(boxed, .lower);
     std.debug.print("message:      {s}\n", .{message});
