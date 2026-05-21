@@ -1,3 +1,7 @@
+# Claude Code / AI assistant artifacts (kept local, not published yet)
+.claude/
+CLAUDE.md
+
 # Zig build artifacts
 zig-cache/
 zig-out/

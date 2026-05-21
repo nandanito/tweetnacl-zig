@@ -1,79 +1,68 @@
+//! XSalsa20 stream cipher — Salsa20 extended to a 192-bit (24-byte) nonce.
+//!
+//! Low-level building block; provides confidentiality only. For authenticated
+//! encryption use `secretbox`.
 const std = @import("std");
 const salsa20 = @import("salsa20.zig");
-const mem = std.mem;
-const crypto = std.crypto;
 
-/// XSalsa20 constants
-const sigma = [_]u8{ 101, 120, 112, 97, 110, 100, 32, 51, 50, 45, 98, 121, 116, 101, 32, 107 };
+/// XSalsa20 stream cipher: XORs `msg` with the keystream produced from a
+/// 24-byte nonce and a 32-byte key, writing `msg.len` bytes to `out`.
+///
+/// The same call decrypts. Provides confidentiality only — no authentication.
+pub fn stream(out: []u8, msg: []const u8, nonce: *const [24]u8, key: *const [32]u8) void {
+    std.debug.assert(out.len == msg.len);
 
-/// XSalsa20 stream cipher (24-byte nonce version)
-pub fn xsalsa20Xor(
-    out: []u8,
-    msg: []const u8,
-    nonce: []const u8,
-    key: []const u8,
-) void {
-    std.debug.assert(nonce.len == 24); // xsalsa20 requires 24-byte nonce
-    std.debug.assert(key.len == 32); // 256-bit key
-    std.debug.assert(out.len == msg.len); // Output must match message size
-
-    // HSalsa20 for subkey generation
+    // Derive a subkey from the first 16 nonce bytes via HSalsa20...
     var subkey: [32]u8 = undefined;
-    salsa20.hsalsa20(
-        subkey[0..], // out
-        nonce[0..16], // input (first 16 bytes of nonce)
-        key, // key
-    );
+    defer std.crypto.secureZero(u8, &subkey);
+    salsa20.hsalsa20(&subkey, nonce[0..16], key);
 
-    // Salsa20 for actual encryption
-    salsa20.salsa20Xor(
-        out,
-        msg,
-        nonce[16..24], // Last 8 bytes as Salsa20 nonce
-        &subkey,
-    );
+    // ...then run Salsa20 with that subkey and the remaining 8 nonce bytes.
+    salsa20.stream(out, msg, nonce[16..24], &subkey);
 }
 
-// Test vector from NaCl's tests/stream2.c
-test "XSalsa20 Known Answer Test" {
-    const key = [_]u8{0} ** 32;
-    const nonce = [_]u8{0} ** 24;
-    const msg = [_]u8{0} ** 128;
-    var cipher: [128]u8 = undefined;
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
-    xsalsa20Xor(&cipher, &msg, &nonce, &key);
+const testing = std.testing;
 
-    // Expected output from first 32 bytes of 128-zero-byte encryption
-    const expected = [_]u8{
-        0x21, 0xa7, 0x60, 0xf7, 0xd5, 0xbf, 0xec, 0x7a,
-        0x3f, 0x3f, 0x0a, 0x6a, 0xdc, 0x1f, 0x1d, 0xab,
-        0xee, 0x1c, 0x46, 0x8a, 0x2d, 0x53, 0xae, 0x16,
-        0x4a, 0x18, 0xcc, 0x02, 0x7c, 0xbf, 0xe0, 0xdb,
-    };
+test "XSalsa20 stream matches std.crypto across sizes (incl. multi-block)" {
+    var prng = std.Random.DefaultPrng.init(0xfeedface00c0ffee);
+    const rand = prng.random();
+    const sizes = [_]usize{ 0, 1, 63, 64, 65, 128, 192, 777 };
+    for (sizes) |len| {
+        var iter: usize = 0;
+        while (iter < 32) : (iter += 1) {
+            var key: [32]u8 = undefined;
+            var nonce: [24]u8 = undefined;
+            var msg: [777]u8 = undefined;
+            rand.bytes(&key);
+            rand.bytes(&nonce);
+            rand.bytes(msg[0..len]);
 
-    try std.testing.expectEqualSlices(
-        u8,
-        &expected,
-        cipher[0..32],
-    );
+            var mine: [777]u8 = undefined;
+            var reference: [777]u8 = undefined;
+            stream(mine[0..len], msg[0..len], &nonce, &key);
+            std.crypto.stream.salsa.XSalsa20.xor(reference[0..len], msg[0..len], 0, key, nonce);
+            try testing.expectEqualSlices(u8, reference[0..len], mine[0..len]);
+        }
+    }
 }
 
-test "XSalsa20 Round Trip" {
-    const allocator = std.testing.allocator;
-    const msg = "Test message for XSalsa20";
-    const nonce = [_]u8{0} ** 24;
-    const key = [_]u8{0x42} ** 32;
+test "XSalsa20 stream round-trips" {
+    var prng = std.Random.DefaultPrng.init(0x99aabbccddeeff00);
+    const rand = prng.random();
+    var key: [32]u8 = undefined;
+    var nonce: [24]u8 = undefined;
+    var msg: [250]u8 = undefined;
+    rand.bytes(&key);
+    rand.bytes(&nonce);
+    rand.bytes(&msg);
 
-    const cipher = try allocator.alloc(u8, msg.len);
-    defer allocator.free(cipher);
-    const plain = try allocator.alloc(u8, msg.len);
-    defer allocator.free(plain);
-
-    // Encrypt
-    xsalsa20Xor(cipher, msg, &nonce, &key);
-
-    // Decrypt (XSalsa20 is symmetric)
-    xsalsa20Xor(plain, cipher, &nonce, &key);
-
-    try std.testing.expectEqualStrings(msg, plain);
+    var ciphertext: [250]u8 = undefined;
+    var plaintext: [250]u8 = undefined;
+    stream(&ciphertext, &msg, &nonce, &key);
+    stream(&plaintext, &ciphertext, &nonce, &key);
+    try testing.expectEqualSlices(u8, &msg, &plaintext);
 }

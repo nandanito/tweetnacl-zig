@@ -1,216 +1,204 @@
+//! Salsa20 / HSalsa20 core permutation and the Salsa20 stream cipher.
+//!
+//! These are low-level building blocks: the stream cipher provides
+//! confidentiality only. For authenticated encryption use `secretbox`.
 const std = @import("std");
-const mem = std.mem;
-const crypto = std.crypto;
 
-/// Salsa20 Constants
-const sigma = "expand 32-byte k".*;
-const tau = "expand 16-byte k".*;
+/// Salsa20 constant for a 256-bit key: the ASCII bytes of "expand 32-byte k".
+const sigma = [16]u8{
+    'e', 'x', 'p', 'a', 'n', 'd', ' ', '3',
+    '2', '-', 'b', 'y', 't', 'e', ' ', 'k',
+};
 
-/// Core Salsa20/HSalsa20 implementation
-fn core(
-    out: []u8,
-    input: []const u8,
-    key: []const u8,
-    constant: []const u8,
-    comptime h: bool, // true for HSalsa20
-) void {
-    std.debug.assert(input.len == 16);
-    std.debug.assert(key.len == 32);
-    std.debug.assert(constant.len == 16);
-    std.debug.assert(out.len == if (h) 32 else 64);
+/// One Salsa20 quarter-round, applied in place to four words of the state.
+///
+/// `quarterround(y0,y1,y2,y3)` per the Salsa20 specification:
+///   z1 = y1 ^ (y0 + y3) <<< 7
+///   z2 = y2 ^ (z1 + y0) <<< 9
+///   z3 = y3 ^ (z2 + z1) <<< 13
+///   z0 = y0 ^ (z3 + z2) <<< 18
+inline fn quarterRound(x: *[16]u32, a: usize, b: usize, c: usize, d: usize) void {
+    x[b] ^= std.math.rotl(u32, x[a] +% x[d], 7);
+    x[c] ^= std.math.rotl(u32, x[b] +% x[a], 9);
+    x[d] ^= std.math.rotl(u32, x[c] +% x[b], 13);
+    x[a] ^= std.math.rotl(u32, x[d] +% x[c], 18);
+}
 
-    var state: [16]u32 = undefined;
+/// Builds the initial 16-word Salsa20 state from the constant, the 32-byte key
+/// and the 16-byte input block (8-byte nonce ++ 8-byte counter).
+fn initState(input: *const [16]u8, key: *const [32]u8) [16]u32 {
+    var s: [16]u32 = undefined;
+    s[0] = std.mem.readInt(u32, sigma[0..4], .little);
+    s[5] = std.mem.readInt(u32, sigma[4..8], .little);
+    s[10] = std.mem.readInt(u32, sigma[8..12], .little);
+    s[15] = std.mem.readInt(u32, sigma[12..16], .little);
 
-    // Initialize state
-    state[0] = std.mem.readInt(u32, constant[0..4], .little);
-    state[5] = std.mem.readInt(u32, constant[4..8], .little);
-    state[10] = std.mem.readInt(u32, constant[8..12], .little);
-    state[15] = std.mem.readInt(u32, constant[12..16], .little);
+    s[1] = std.mem.readInt(u32, key[0..4], .little);
+    s[2] = std.mem.readInt(u32, key[4..8], .little);
+    s[3] = std.mem.readInt(u32, key[8..12], .little);
+    s[4] = std.mem.readInt(u32, key[12..16], .little);
+    s[11] = std.mem.readInt(u32, key[16..20], .little);
+    s[12] = std.mem.readInt(u32, key[20..24], .little);
+    s[13] = std.mem.readInt(u32, key[24..28], .little);
+    s[14] = std.mem.readInt(u32, key[28..32], .little);
 
-    state[1] = std.mem.readInt(u32, key[0..4], .little);
-    state[2] = std.mem.readInt(u32, key[4..8], .little);
-    state[3] = std.mem.readInt(u32, key[8..12], .little);
-    state[4] = std.mem.readInt(u32, key[12..16], .little);
+    s[6] = std.mem.readInt(u32, input[0..4], .little);
+    s[7] = std.mem.readInt(u32, input[4..8], .little);
+    s[8] = std.mem.readInt(u32, input[8..12], .little);
+    s[9] = std.mem.readInt(u32, input[12..16], .little);
+    return s;
+}
 
-    state[11] = std.mem.readInt(u32, key[16..20], .little);
-    state[12] = std.mem.readInt(u32, key[20..24], .little);
-    state[13] = std.mem.readInt(u32, key[24..28], .little);
-    state[14] = std.mem.readInt(u32, key[28..32], .little);
-
-    state[6] = std.mem.readInt(u32, input[0..4], .little);
-    state[7] = std.mem.readInt(u32, input[4..8], .little);
-    state[8] = std.mem.readInt(u32, input[8..12], .little);
-    state[9] = std.mem.readInt(u32, input[12..16], .little);
-
-    var working_state = state;
-
-    // Salsa20 rounds
-    comptime var rounds = 20;
-    inline while (rounds > 0) : (rounds -= 2) {
-        // Column rounds
-        inline for ([4]usize{ 0, 4, 8, 12 }) |i| {
-            working_state[i + 0] ^= std.math.rotl(u32, working_state[i + 1] +% working_state[i + 3], 7);
-            working_state[i + 2] ^= std.math.rotl(u32, working_state[i + 0] +% working_state[i + 1], 9);
-            working_state[i + 1] ^= std.math.rotl(u32, working_state[i + 2] +% working_state[i + 0], 13);
-            working_state[i + 3] ^= std.math.rotl(u32, working_state[i + 1] +% working_state[i + 2], 18);
-        }
-
-        // Row rounds
-        inline for ([4]usize{ 0, 1, 2, 3 }) |i| {
-            const j = i * 4;
-            working_state[j] ^= std.math.rotl(u32, working_state[(j + 1) % 16] +% working_state[(j + 3) % 16], 7);
-            working_state[(j + 2) % 16] ^= std.math.rotl(u32, working_state[j] +% working_state[(j + 1) % 16], 9);
-            working_state[(j + 1) % 16] ^= std.math.rotl(u32, working_state[(j + 2) % 16] +% working_state[j], 13);
-            working_state[(j + 3) % 16] ^= std.math.rotl(u32, working_state[(j + 1) % 16] +% working_state[(j + 2) % 16], 18);
-        }
-    }
-
-    // Final addition
-    if (h) {
-        // HSalsa20 output
-        std.mem.writeInt(u32, out[0..4], working_state[0], .little);
-        std.mem.writeInt(u32, out[4..8], working_state[5], .little);
-        std.mem.writeInt(u32, out[8..12], working_state[10], .little);
-        std.mem.writeInt(u32, out[12..16], working_state[15], .little);
-        std.mem.writeInt(u32, out[16..20], working_state[6], .little);
-        std.mem.writeInt(u32, out[20..24], working_state[7], .little);
-        std.mem.writeInt(u32, out[24..28], working_state[8], .little);
-        std.mem.writeInt(u32, out[28..32], working_state[9], .little);
-    } else {
-        // Salsa20 output
-        for (0..16) |i| {
-            const val = state[i] +% working_state[i];
-            const bytes = @as(*[4]u8, @ptrCast(out[i * 4 .. i * 4 + 4]));
-            std.mem.writeInt(u32, bytes, val, .little);
-        }
+/// Applies the 20-round Salsa20 permutation (10 column/row double-rounds) to
+/// the working state in place.
+fn permute(x: *[16]u32) void {
+    var round: usize = 0;
+    while (round < 10) : (round += 1) {
+        // Column round.
+        quarterRound(x, 0, 4, 8, 12);
+        quarterRound(x, 5, 9, 13, 1);
+        quarterRound(x, 10, 14, 2, 6);
+        quarterRound(x, 15, 3, 7, 11);
+        // Row round.
+        quarterRound(x, 0, 1, 2, 3);
+        quarterRound(x, 5, 6, 7, 4);
+        quarterRound(x, 10, 11, 8, 9);
+        quarterRound(x, 15, 12, 13, 14);
     }
 }
 
-/// Public Salsa20 Core Function
-pub fn salsa20(out: []u8, input: []const u8, key: []const u8) void {
-    core(out, input, key, &sigma, false);
+/// Salsa20 core: produces one 64-byte keystream block from the 16-byte input
+/// block (8-byte nonce ++ 8-byte counter) and the 32-byte key.
+pub fn core(out: *[64]u8, input: *const [16]u8, key: *const [32]u8) void {
+    const state = initState(input, key);
+    var x = state;
+    permute(&x);
+    for (0..16) |i| {
+        std.mem.writeInt(u32, out[i * 4 ..][0..4], x[i] +% state[i], .little);
+    }
 }
 
-/// Public HSalsa20 Core Function
-pub fn hsalsa20(out: []u8, input: []const u8, key: []const u8) void {
-    core(out, input, key, &sigma, true);
+/// HSalsa20 core: derives a 32-byte subkey. Used by XSalsa20 to extend Salsa20
+/// to a 24-byte nonce.
+pub fn hsalsa20(out: *[32]u8, input: *const [16]u8, key: *const [32]u8) void {
+    var x = initState(input, key);
+    permute(&x);
+    const words = [8]u32{ x[0], x[5], x[10], x[15], x[6], x[7], x[8], x[9] };
+    for (words, 0..) |w, i| {
+        std.mem.writeInt(u32, out[i * 4 ..][0..4], w, .little);
+    }
 }
 
-/// Salsa20 in XOR mode (for direct use by XSalsa20)
-pub fn salsa20Xor(
-    out: []u8,
-    msg: []const u8,
-    nonce: []const u8, // 8 bytes
-    key: []const u8, // 32 bytes
-) void {
-    std.debug.assert(nonce.len == 8); // 64-bit nonce
-    std.debug.assert(key.len == 32); // 256-bit key
-    std.debug.assert(out.len == msg.len); // Output matches input
+/// Salsa20 stream cipher: XORs `msg` with the keystream produced from an
+/// 8-byte nonce and a 32-byte key, writing `msg.len` bytes to `out`.
+///
+/// The same call decrypts. Provides confidentiality only — no authentication.
+pub fn stream(out: []u8, msg: []const u8, nonce: *const [8]u8, key: *const [32]u8) void {
+    std.debug.assert(out.len == msg.len);
 
-    var counter: [16]u8 = undefined;
+    // Salsa20 input block: 8-byte nonce ++ 64-bit little-endian block counter.
+    var input: [16]u8 = undefined;
+    @memcpy(input[0..8], nonce);
+    @memset(input[8..16], 0);
+
     var block: [64]u8 = undefined;
-    var full_nonce: [16]u8 = undefined;
-
-    // Counter is zero-initialized, nonce occupies last 8 bytes
-    @memcpy(counter[8..16], nonce);
-    @memcpy(full_nonce[0..8], nonce);
-
     var offset: usize = 0;
-    while (offset < msg.len) {
-        // Generate key stream block
-        salsa20(&block, &full_nonce, key);
-
-        // XOR with message
-        const end = @min(offset + 64, msg.len);
-        for (offset..end) |i| {
-            out[i] = msg[i] ^ block[i - offset];
+    while (offset < msg.len) : (offset += 64) {
+        core(&block, &input, key);
+        const n = @min(@as(usize, 64), msg.len - offset);
+        for (0..n) |i| {
+            out[offset + i] = msg[offset + i] ^ block[i];
         }
-
-        // Increment counter (little-endian)
-        var i: usize = 0;
-        while (i < 8) : (i += 1) {
-            counter[i] += 1;
-            if (counter[i] != 0) break;
-        }
-
-        offset += 64;
+        // Advance the block counter (wrapping; messages never reach 2^64 blocks).
+        const counter = std.mem.readInt(u64, input[8..16], .little);
+        std.mem.writeInt(u64, input[8..16], counter +% 1, .little);
     }
 }
 
-test "Salsa20 Core Test Vector" {
-    const key = [_]u8{0} ** 32;
-    const input = [_]u8{0} ** 16;
-    var out: [64]u8 = undefined;
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
-    salsa20(&out, &input, &key);
+const testing = std.testing;
 
-    const expected = "9A97F65B9B4C721B960A672145FCA8D4E32E67F911461E3BE6B445ECF0806B5".*;
-    try std.testing.expectEqualSlices(u8, &expected, out[0..32]);
-}
-
-test "HSalsa20 Test Vector" {
-    const key = [_]u8{0} ** 32;
+test "HSalsa20 known-answer vector (NaCl tests/core1.c)" {
+    // NaCl's HSalsa20 test: a fixed 32-byte key and an all-zero 16-byte input.
+    const key = [32]u8{
+        0x4a, 0x5d, 0x9d, 0x5b, 0xa4, 0xce, 0x2d, 0xe1,
+        0x72, 0x8e, 0x3b, 0xf4, 0x80, 0x35, 0x0f, 0x25,
+        0xe0, 0x7e, 0x21, 0xc9, 0x47, 0xd1, 0x9e, 0x33,
+        0x76, 0xf0, 0x9b, 0x3c, 0x1e, 0x16, 0x17, 0x42,
+    };
     const input = [_]u8{0} ** 16;
     var out: [32]u8 = undefined;
-
     hsalsa20(&out, &input, &key);
 
-    const expected = "1B27556473E985D462CD51197A9A46C76009549EAC6474F206C4EE0844F68389".*;
-    try std.testing.expectEqualSlices(u8, &expected, &out);
+    const expected = [32]u8{
+        0x1b, 0x27, 0x55, 0x64, 0x73, 0xe9, 0x85, 0xd4,
+        0x62, 0xcd, 0x51, 0x19, 0x7a, 0x9a, 0x46, 0xc7,
+        0x60, 0x09, 0x54, 0x9e, 0xac, 0x64, 0x74, 0xf2,
+        0x06, 0xc4, 0xee, 0x08, 0x44, 0xf6, 0x83, 0x89,
+    };
+    try testing.expectEqualSlices(u8, &expected, &out);
 }
 
-// src/xsalsa20.zig (additional test)
+test "Salsa20 core equals the first keystream block" {
+    var prng = std.Random.DefaultPrng.init(0x5a15a20c0123abcd);
+    const rand = prng.random();
+    var key: [32]u8 = undefined;
+    var nonce: [8]u8 = undefined;
+    rand.bytes(&key);
+    rand.bytes(&nonce);
 
-test "XSalsa20 Complete Usage Example" {
-    const testing = std.testing;
-    const allocator = testing.allocator;
+    var input: [16]u8 = undefined;
+    @memcpy(input[0..8], &nonce);
+    @memset(input[8..16], 0);
+    var block: [64]u8 = undefined;
+    core(&block, &input, &key);
 
-    // --- Test Configuration ---
-    const original_msg = "Hello, Zig! Secured with XSalsa20";
-    const key = [_]u8{
-        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
-        0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
-        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
-        0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
-    };
-    const nonce = [_]u8{
-        0xca, 0xfe, 0xba, 0xbe, 0xde, 0xad, 0xbe, 0xef,
-        0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0,
-        0x24, 0x68, 0x13, 0x57, 0x9b, 0xdf, 0x27, 0x5a,
-    };
+    const zeros = [_]u8{0} ** 64;
+    var keystream: [64]u8 = undefined;
+    stream(&keystream, &zeros, &nonce, &key);
 
-    // --- Buffers ---
-    const ciphertext = try allocator.alloc(u8, original_msg.len);
-    defer allocator.free(ciphertext);
-    const decrypted = try allocator.alloc(u8, original_msg.len);
-    defer allocator.free(decrypted);
+    try testing.expectEqualSlices(u8, &keystream, &block);
+}
 
-    // --- Encryption ---
-    salsa20Xor(ciphertext, original_msg, &nonce, &key);
+test "Salsa20 stream matches std.crypto across sizes (incl. multi-block)" {
+    var prng = std.Random.DefaultPrng.init(0xabcdef0123456789);
+    const rand = prng.random();
+    const sizes = [_]usize{ 0, 1, 31, 63, 64, 65, 127, 128, 200, 1000 };
+    for (sizes) |len| {
+        var iter: usize = 0;
+        while (iter < 32) : (iter += 1) {
+            var key: [32]u8 = undefined;
+            var nonce: [8]u8 = undefined;
+            var msg: [1000]u8 = undefined;
+            rand.bytes(&key);
+            rand.bytes(&nonce);
+            rand.bytes(msg[0..len]);
 
-    // Print results
-    std.debug.print("\nOriginal: {s}\n", .{original_msg});
-    std.debug.print("Ciphertext (hex): {s}\n", .{
-        std.fmt.fmtSliceHexLower(ciphertext),
-    });
+            var mine: [1000]u8 = undefined;
+            var reference: [1000]u8 = undefined;
+            stream(mine[0..len], msg[0..len], &nonce, &key);
+            std.crypto.stream.salsa.Salsa20.xor(reference[0..len], msg[0..len], 0, key, nonce);
+            try testing.expectEqualSlices(u8, reference[0..len], mine[0..len]);
+        }
+    }
+}
 
-    // --- Decryption ---
-    salsa20Xor(decrypted, ciphertext, &nonce, &key);
-    std.debug.print("Decrypted: {s}\n\n", .{decrypted});
+test "Salsa20 stream round-trips" {
+    var prng = std.Random.DefaultPrng.init(0x0011223344556677);
+    const rand = prng.random();
+    var key: [32]u8 = undefined;
+    var nonce: [8]u8 = undefined;
+    var msg: [333]u8 = undefined;
+    rand.bytes(&key);
+    rand.bytes(&nonce);
+    rand.bytes(&msg);
 
-    // --- Verification ---
-    try std.testing.expectEqualSlices(u8, original_msg, decrypted);
-
-    // --- Known Answer Test ---
-    const expected_cipher = [_]u8{
-        0x45, 0x3d, 0x80, 0x4e, 0x2b, 0x8d, 0x1c, 0xab,
-        0x6d, 0x79, 0x1f, 0xbe, 0x9c, 0x9f, 0x30, 0x4c,
-        0x5e, 0x24, 0x47, 0x9f, 0x8d, 0x95, 0x0d, 0x54,
-        0x42, 0xbd, 0x23, 0x4d, 0x05, 0x3a, 0x6a, 0xae,
-    };
-    try std.testing.expectEqualSlices(
-        u8,
-        &expected_cipher,
-        ciphertext[0..expected_cipher.len],
-    );
+    var ciphertext: [333]u8 = undefined;
+    var plaintext: [333]u8 = undefined;
+    stream(&ciphertext, &msg, &nonce, &key);
+    stream(&plaintext, &ciphertext, &nonce, &key);
+    try testing.expectEqualSlices(u8, &msg, &plaintext);
 }
