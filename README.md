@@ -6,7 +6,7 @@
 
 A minimal, auditable Zig port of [TweetNaCl](https://tweetnacl.cr.yp.to/) — Bernstein's compact cryptographic library — targeting **wire compatibility** with [tweetnacl-js](https://github.com/dchest/tweetnacl-js).
 
-> ⚠️ **Early stage.** Authenticated encryption (`secretbox`), the Salsa20 family and Poly1305 are implemented and verified; public-key encryption, signatures and hashing are still to come. The API will change as more primitives land, and the library has not been audited — do not use it in production yet.
+> ⚠️ **Early stage.** Authenticated encryption (`secretbox` and `box`), the Salsa20 family, Poly1305 and X25519 are implemented and verified; signatures and hashing are still to come. The API will change as more primitives land, and the library has not been audited — do not use it in production yet.
 
 ## Why this exists
 
@@ -23,11 +23,13 @@ If you need vetted cryptography in production today, reach for `std.crypto`.
 | API | Kind | Status |
 |---|---|---|
 | `secretbox` — XSalsa20-Poly1305 | High-level authenticated encryption | ✅ |
+| `box` — Curve25519-XSalsa20-Poly1305 | High-level public-key authenticated encryption | ✅ |
 | `lowlevel.salsa20` — core / HSalsa20 / stream | Low-level building block | ✅ |
 | `lowlevel.xsalsa20` — stream | Low-level building block | ✅ |
 | `lowlevel.poly1305` — one-time MAC | Low-level building block | ✅ |
+| `lowlevel.scalarmult` — Curve25519 / X25519 | Low-level building block | ✅ |
 
-`secretbox` is the API most applications should use. The `lowlevel` primitives are building blocks; everything is verified against `std.crypto` and published test vectors. Public-key encryption (`box`), signatures (`sign`) and hashing (`hash`) are on the [roadmap](#roadmap).
+`secretbox` and `box` are the APIs most applications should use. The `lowlevel` primitives are building blocks; everything is verified against `std.crypto` and published test vectors. Signatures (`sign`) and hashing (`hash`) are on the [roadmap](#roadmap).
 
 ## Installation
 
@@ -78,6 +80,31 @@ Output buffers are caller-allocated: `seal` needs `msg.len + 16` bytes, `open` n
 
 The output is byte-for-byte identical to TweetNaCl / tweetnacl-js, so a sealed box can be opened by any NaCl implementation.
 
+### box — public-key authenticated encryption
+
+`box` is `secretbox` for two parties who each hold a key pair: the sender seals a message with the recipient's **public** key and their own **secret** key; the recipient opens it with their own secret key and the sender's public key. The result is encrypted *and* authenticated, so the recipient knows the message is genuine and untampered — without the two ever sharing a secret key.
+
+```zig
+// Each party holds a key pair and shares only its public key.
+const alice = nacl.box.keyPair(io);
+const bob = nacl.box.keyPair(io);
+
+const nonce: [24]u8 = ...; // unique per message — never reuse one
+const message = "attack at dawn";
+
+// Alice seals for Bob: his public key, her secret key.
+var boxed: [message.len + nacl.box.overhead]u8 = undefined;
+try nacl.box.seal(&boxed, message, &nonce, &bob.public_key, &alice.secret_key);
+
+// Bob opens it: Alice's public key, his secret key. Returns error.AuthFailed
+// — without writing any plaintext — if the box was tampered with.
+var opened: [message.len]u8 = undefined;
+try nacl.box.open(&opened, &boxed, &nonce, &alice.public_key, &bob.secret_key);
+// opened now equals message
+```
+
+`box.keyPair(io)` draws a fresh secret key from `io`'s CSPRNG (`io` is a `std.Io`); `box.keyPairFromSecretKey(&sk)` derives a key pair deterministically from an existing 32-byte secret key. When several messages travel between the same pair of keys, derive the shared key once with `box.beforenm` and reuse it via `box.sealAfternm` / `box.openAfternm` — this skips the X25519 scalar multiplication on every message. `beforenm`, `seal` and `open` return `error.WeakPublicKey` if a supplied public key is a low-order Curve25519 point (which would collapse the shared key to a fixed, publicly-known value). Output is byte-for-byte identical to TweetNaCl / tweetnacl-js.
+
 ### lowlevel — stream cipher and MAC
 
 When you need the raw primitives, they live under `nacl.lowlevel`. The XSalsa20 stream cipher XORs a message with a keystream; it is symmetric, so the *same call* encrypts and decrypts:
@@ -89,7 +116,7 @@ nacl.lowlevel.xsalsa20.stream(&ciphertext, message, &nonce, &key);
 
 > ⚠️ **A stream cipher gives you confidentiality, not integrity.** Anyone can flip bits in the ciphertext and the tampering is invisible at decryption. Use `secretbox` unless you are authenticating the data by some other means.
 
-Also available: `lowlevel.salsa20.core` (the raw 64-byte block function), `lowlevel.salsa20.hsalsa20` (subkey derivation), `lowlevel.salsa20.stream`, and `lowlevel.poly1305.auth` / `.verify` (the one-time MAC). See [ARCHITECTURE.md](ARCHITECTURE.md) for how they compose.
+Also available: `lowlevel.salsa20.core` (the raw 64-byte block function), `lowlevel.salsa20.hsalsa20` (subkey derivation), `lowlevel.salsa20.stream`, `lowlevel.poly1305.auth` / `.verify` (the one-time MAC), and `lowlevel.scalarmult` (Curve25519 / X25519 scalar multiplication). See [ARCHITECTURE.md](ARCHITECTURE.md) for how they compose.
 
 ### Runnable examples
 
@@ -98,6 +125,7 @@ The [`examples/`](examples/) directory has complete, commented programs:
 | Example | Run it | Demonstrates |
 |---|---|---|
 | `secretbox_demo` | `zig build secretbox_demo` | Authenticated encryption: seal, open, and tamper detection |
+| `box_demo` | `zig build box_demo` | Public-key authenticated encryption between two key pairs |
 | `xsalsa20_demo` | `zig build xsalsa20_demo` | XSalsa20 stream-cipher encrypt → decrypt round-trip |
 | `salsa20_demo` | `zig build salsa20_demo` | Salsa20 core block + HSalsa20 subkey derivation |
 
@@ -124,8 +152,8 @@ zig test src/salsa20.zig --test-filter "round-trip"
 - [x] Salsa20 and XSalsa20 stream ciphers
 - [x] Poly1305 one-time MAC
 - [x] `secretbox` — XSalsa20-Poly1305 authenticated encryption
-- [ ] Curve25519 (X25519) scalar multiplication
-- [ ] `box` — Curve25519-XSalsa20-Poly1305 public-key encryption
+- [x] Curve25519 (X25519) scalar multiplication
+- [x] `box` — Curve25519-XSalsa20-Poly1305 public-key encryption
 - [ ] SHA-512 hashing
 - [ ] `sign` — Ed25519 signatures
 - [ ] First tagged release

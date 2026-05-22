@@ -20,7 +20,7 @@ implementation suitable for study and audit. Consequently:
 | Namespace   | Primitive                                              | Status   |
 |-------------|--------------------------------------------------------|----------|
 | `secretbox` | XSalsa20-Poly1305 authenticated encryption (symmetric) | ✅       |
-| `box`       | Curve25519-XSalsa20-Poly1305 authenticated encryption (public-key) | roadmap |
+| `box`       | Curve25519-XSalsa20-Poly1305 authenticated encryption (public-key) | ✅       |
 | `sign`      | Ed25519 signatures                                     | roadmap  |
 | `hash`      | SHA-512                                                | roadmap  |
 
@@ -31,14 +31,14 @@ implementation suitable for study and audit. Consequently:
 | `lowlevel.salsa20`    | `core`, `hsalsa20`, `stream`          | ✅       |
 | `lowlevel.xsalsa20`   | `stream`                              | ✅       |
 | `lowlevel.poly1305`   | `auth`, `verify` (one-time MAC)       | ✅       |
-| `lowlevel.scalarmult` | Curve25519 / X25519                   | roadmap  |
+| `lowlevel.scalarmult` | Curve25519 / X25519                   | ✅       |
 
 Each primitive composes the one below it:
 
 ```
 xsalsa20.stream = salsa20.hsalsa20 (subkey) + salsa20.stream
 secretbox       = XSalsa20 keystream + poly1305
-box             = scalarmult + secretbox              (roadmap)
+box             = scalarmult (beforenm) + secretbox
 ```
 
 Inside `salsa20.zig`, a single `permute` (the 20-round column/row permutation)
@@ -89,12 +89,14 @@ not a transliteration of the JavaScript or C signatures.
 
 ```
 src/
-  root.zig       Public API surface (secretbox + lowlevel)
+  root.zig       Public API surface (secretbox + box + lowlevel)
   secretbox.zig  XSalsa20-Poly1305 authenticated encryption
+  box.zig        Curve25519-XSalsa20-Poly1305 public-key authenticated encryption
   lowlevel.zig   Aggregator for the low-level namespace
   salsa20.zig    Salsa20 / HSalsa20 core + Salsa20 stream cipher
   xsalsa20.zig   XSalsa20 stream cipher
   poly1305.zig   Poly1305 one-time MAC
+  scalarmult.zig Curve25519 / X25519 scalar multiplication
 build.zig        Zig 0.16 build: static library, test step, example runners
 examples/        One runnable, commented program per usable primitive
 ```
@@ -112,5 +114,9 @@ graph into `zig build test`.
 - **The `lowlevel` stream ciphers provide confidentiality only.** They do not
   authenticate; ciphertext malleability is expected and is the caller's
   responsibility. Use `secretbox` for authenticated encryption.
+- `box` rejects low-order ("weak") public keys with `error.WeakPublicKey` — one
+  would force the X25519 output, and hence the shared key, to a fixed and
+  publicly-known value. TweetNaCl itself omits this check; rejecting a weak key
+  changes no output for valid keys, so wire compatibility is preserved.
 - The library is early-stage and unaudited. Prefer `std.crypto` for production
   use.
