@@ -22,7 +22,7 @@ implementation suitable for study and audit. Consequently:
 | `secretbox` | XSalsa20-Poly1305 authenticated encryption (symmetric) | ✅       |
 | `box`       | Curve25519-XSalsa20-Poly1305 authenticated encryption (public-key) | ✅       |
 | `hash`      | SHA-512                                                | ✅       |
-| `sign`      | Ed25519 signatures                                     | roadmap  |
+| `sign`      | Ed25519 signatures                                     | ✅       |
 
 **Low-level API** (`lowlevel`) — building blocks for advanced use:
 
@@ -39,6 +39,7 @@ Each primitive composes the one below it:
 xsalsa20.stream = salsa20.hsalsa20 (subkey) + salsa20.stream
 secretbox       = XSalsa20 keystream + poly1305
 box             = scalarmult (beforenm) + secretbox
+sign            = hash (SHA-512) + edwards25519 group ops
 ```
 
 Inside `salsa20.zig`, a single `permute` (the 20-round column/row permutation)
@@ -49,6 +50,14 @@ is shared by `core` (64-byte block — adds the initial state back) and
 XSalsa20 keystream; the message itself is encrypted with the keystream from
 byte 32 onward. `open` verifies the tag in constant time and returns
 `error.AuthFailed` *before* writing any plaintext.
+
+`sign` is Ed25519: the 32-byte secret seed expands through SHA-512 into a
+clamped signing scalar and a per-key signing prefix; the per-message nonce is
+`SHA-512(prefix ++ message) mod L`, making signing deterministic. The signature
+is the pair `(R, S)` where `R = r·B` and `S = r + SHA-512(R ++ A ++ m)·a mod L`;
+verification checks `S·B = R + h·A`. Edwards-curve points use extended
+coordinates and the dedicated Hisil et al. addition formula. `hash` exposes a
+streaming `Hasher` for the `R ++ A ++ m` concatenations.
 
 ## API conventions
 
@@ -91,10 +100,11 @@ not a transliteration of the JavaScript or C signatures.
 
 ```
 src/
-  root.zig       Public API surface (secretbox + box + lowlevel)
+  root.zig       Public API surface (secretbox + box + hash + sign + lowlevel)
   secretbox.zig  XSalsa20-Poly1305 authenticated encryption
   box.zig        Curve25519-XSalsa20-Poly1305 public-key authenticated encryption
-  hash.zig       SHA-512
+  hash.zig       SHA-512 (one-shot `hash` + streaming `Hasher`)
+  sign.zig       Ed25519 signatures (edwards25519 group ops + SHA-512)
   lowlevel.zig   Aggregator for the low-level namespace
   salsa20.zig    Salsa20 / HSalsa20 core + Salsa20 stream cipher
   xsalsa20.zig   XSalsa20 stream cipher

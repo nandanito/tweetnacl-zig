@@ -25,7 +25,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(lib_tests).step);
 
     // Examples: `zig build <name>` builds and runs each one.
-    const example_names = [_][]const u8{ "salsa20_demo", "xsalsa20_demo", "secretbox_demo", "box_demo", "hash_demo" };
+    const example_names = [_][]const u8{ "salsa20_demo", "xsalsa20_demo", "secretbox_demo", "box_demo", "hash_demo", "sign_demo" };
     inline for (example_names) |name| {
         const exe = b.addExecutable(.{
             .name = name,
