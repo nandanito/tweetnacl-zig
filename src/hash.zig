@@ -111,32 +111,95 @@ fn hashBlocks(state: *[8]u64, blocks: []const u8) void {
     }
 }
 
+/// Streaming SHA-512: `init` → one or more `update` → `final`. The one-shot
+/// `hash` below is the common case; `sign` uses streaming to hash
+/// concatenations like `R || pk || m` without materialising them.
+pub const Hasher = struct {
+    state: [8]u64,
+    /// Buffered tail of the message, smaller than one block.
+    buffer: [block_length]u8,
+    buffer_len: usize,
+    /// Total bytes absorbed so far — used to encode the length on `final`.
+    total_bytes: u64,
+
+    pub fn init() Hasher {
+        return .{
+            .state = iv,
+            .buffer = undefined,
+            .buffer_len = 0,
+            .total_bytes = 0,
+        };
+    }
+
+    /// Absorbs `msg` into the hash. Any whole 128-byte blocks are processed
+    /// in-place; the trailing partial block is buffered for the next call or
+    /// for `final`.
+    pub fn update(self: *Hasher, msg: []const u8) void {
+        self.total_bytes += msg.len;
+        var i: usize = 0;
+        // Top up the buffer first so the rest can stream whole blocks.
+        if (self.buffer_len > 0) {
+            const space = block_length - self.buffer_len;
+            const take = @min(space, msg.len);
+            @memcpy(self.buffer[self.buffer_len..][0..take], msg[0..take]);
+            self.buffer_len += take;
+            i = take;
+            if (self.buffer_len == block_length) {
+                hashBlocks(&self.state, &self.buffer);
+                self.buffer_len = 0;
+            }
+        }
+        // Absorb every whole block straight from `msg`, leaving any tail.
+        const remaining = msg.len - i;
+        const whole = remaining - (remaining % block_length);
+        if (whole > 0) {
+            hashBlocks(&self.state, msg[i..][0..whole]);
+            i += whole;
+        }
+        if (i < msg.len) {
+            const tail_len = msg.len - i;
+            @memcpy(self.buffer[0..tail_len], msg[i..]);
+            self.buffer_len = tail_len;
+        }
+    }
+
+    /// Pads the tail and emits the digest. The Hasher is left in an
+    /// implementation-defined state; call `wipe` before discarding.
+    pub fn final(self: *Hasher, out: *[digest_length]u8) void {
+        // Pad the tail (FIPS 180-4 §5.1.2): buffered bytes, a single 0x80,
+        // zero padding, then the message length in bits as a big-endian
+        // 128-bit integer. The 17 bytes of overhead spill into a second block
+        // when the remainder leaves no room (112 bytes or more).
+        var tail = [_]u8{0} ** (2 * block_length);
+        defer std.crypto.secureZero(u8, &tail);
+        @memcpy(tail[0..self.buffer_len], self.buffer[0..self.buffer_len]);
+        tail[self.buffer_len] = 0x80;
+        const tail_len: usize = if (self.buffer_len < block_length - 16)
+            block_length
+        else
+            2 * block_length;
+        std.mem.writeInt(u128, tail[tail_len - 16 ..][0..16], @as(u128, self.total_bytes) * 8, .big);
+        hashBlocks(&self.state, tail[0..tail_len]);
+
+        for (0..8) |i| {
+            std.mem.writeInt(u64, out[i * 8 ..][0..8], self.state[i], .big);
+        }
+    }
+
+    /// Wipes the running state — call before letting a Hasher go out of scope
+    /// if it absorbed secret material.
+    pub fn wipe(self: *Hasher) void {
+        std.crypto.secureZero(u64, &self.state);
+        std.crypto.secureZero(u8, &self.buffer);
+    }
+};
+
 /// Computes the SHA-512 digest of `msg`, writing 64 bytes to `out`.
 pub fn hash(out: *[digest_length]u8, msg: []const u8) void {
-    var state = iv;
-    defer std.crypto.secureZero(u64, &state);
-
-    // Absorb every whole block, leaving only the final partial block to pad.
-    const whole = msg.len - (msg.len % block_length);
-    hashBlocks(&state, msg[0..whole]);
-
-    // Pad the tail (FIPS 180-4 §5.1.2): the remaining message bytes, a single
-    // 0x80 byte, zero padding, then the message length in bits as a big-endian
-    // 128-bit integer. The 17 bytes of overhead spill into a second block when
-    // the remainder leaves no room (112 bytes or more).
-    var tail = [_]u8{0} ** (2 * block_length);
-    defer std.crypto.secureZero(u8, &tail);
-    const rem = msg.len - whole;
-    @memcpy(tail[0..rem], msg[whole..]);
-    tail[rem] = 0x80;
-    const tail_len: usize = if (rem < block_length - 16) block_length else 2 * block_length;
-    std.mem.writeInt(u128, tail[tail_len - 16 ..][0..16], @as(u128, msg.len) * 8, .big);
-    hashBlocks(&state, tail[0..tail_len]);
-
-    // Serialise the eight state words big-endian.
-    for (0..8) |i| {
-        std.mem.writeInt(u64, out[i * 8 ..][0..8], state[i], .big);
-    }
+    var h = Hasher.init();
+    defer h.wipe();
+    h.update(msg);
+    h.final(out);
 }
 
 // ---------------------------------------------------------------------------
@@ -218,6 +281,37 @@ test "SHA-512 matches std.crypto across sizes" {
             hash(&mine, msg[0..len]);
             Sha512.hash(msg[0..len], &reference, .{});
             try testing.expectEqualSlices(u8, &reference, &mine);
+        }
+    }
+}
+
+test "SHA-512 Hasher streaming equals one-shot, regardless of chunking" {
+    var prng = std.Random.DefaultPrng.init(0x57a7e4_5ec0ffee);
+    const rand = prng.random();
+    // Sizes that exercise the buffer split logic — partial fills, exact
+    // blocks, and the two-block padding boundary.
+    const sizes = [_]usize{ 0, 1, 63, 64, 65, 111, 112, 127, 128, 200, 1000 };
+    for (sizes) |len| {
+        var iter: usize = 0;
+        while (iter < 8) : (iter += 1) {
+            var msg: [1000]u8 = undefined;
+            rand.bytes(msg[0..len]);
+
+            var one_shot: [64]u8 = undefined;
+            hash(&one_shot, msg[0..len]);
+
+            // Streaming with random chunk sizes — every chunking must agree.
+            var h = Hasher.init();
+            defer h.wipe();
+            var pos: usize = 0;
+            while (pos < len) {
+                const chunk = @min(len - pos, rand.uintLessThan(usize, 200) + 1);
+                h.update(msg[pos .. pos + chunk]);
+                pos += chunk;
+            }
+            var streamed: [64]u8 = undefined;
+            h.final(&streamed);
+            try testing.expectEqualSlices(u8, &one_shot, &streamed);
         }
     }
 }

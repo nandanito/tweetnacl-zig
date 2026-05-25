@@ -6,7 +6,7 @@
 
 A minimal, auditable Zig port of [TweetNaCl](https://tweetnacl.cr.yp.to/) — Bernstein's compact cryptographic library — targeting **wire compatibility** with [tweetnacl-js](https://github.com/dchest/tweetnacl-js).
 
-> ⚠️ **Early stage.** Authenticated encryption (`secretbox` and `box`), SHA-512 hashing, the Salsa20 family, Poly1305 and X25519 are implemented and verified; signatures are still to come. The API will change as more primitives land, and the library has not been audited — do not use it in production yet.
+> ⚠️ **Early stage.** Authenticated encryption (`secretbox` and `box`), SHA-512 hashing, Ed25519 signatures (`sign`), the Salsa20 family, Poly1305 and X25519 are all implemented and verified. The library has not been audited — do not use it in production yet.
 
 ## Why this exists
 
@@ -25,12 +25,13 @@ If you need vetted cryptography in production today, reach for `std.crypto`.
 | `secretbox` — XSalsa20-Poly1305 | High-level authenticated encryption | ✅ |
 | `box` — Curve25519-XSalsa20-Poly1305 | High-level public-key authenticated encryption | ✅ |
 | `hash` — SHA-512 | High-level hash function | ✅ |
+| `sign` — Ed25519 | High-level digital signatures | ✅ |
 | `lowlevel.salsa20` — core / HSalsa20 / stream | Low-level building block | ✅ |
 | `lowlevel.xsalsa20` — stream | Low-level building block | ✅ |
 | `lowlevel.poly1305` — one-time MAC | Low-level building block | ✅ |
 | `lowlevel.scalarmult` — Curve25519 / X25519 | Low-level building block | ✅ |
 
-`secretbox` and `box` are the APIs most applications should use. The `lowlevel` primitives are building blocks; everything is verified against `std.crypto` and published test vectors. Signatures (`sign`) are on the [roadmap](#roadmap).
+`secretbox` and `box` are the APIs most applications should use; `sign` is the digital-signature equivalent. The `lowlevel` primitives are building blocks; everything is verified against `std.crypto` and published test vectors.
 
 ## Installation
 
@@ -117,7 +118,27 @@ var digest: [nacl.hash.digest_length]u8 = undefined; // digest_length == 64
 nacl.hash.hash(&digest, message);
 ```
 
-The message is a slice of any length; the digest is a caller-allocated 64-byte array. Output is byte-for-byte identical to TweetNaCl / tweetnacl-js (`crypto_hash`) and to any other SHA-512 implementation.
+The message is a slice of any length; the digest is a caller-allocated 64-byte array. Output is byte-for-byte identical to TweetNaCl / tweetnacl-js (`crypto_hash`) and to any other SHA-512 implementation. A streaming `nacl.hash.Hasher` (init / update / final) is available for callers that build up the input piecewise.
+
+### sign — Ed25519 digital signatures
+
+`sign` lets the holder of a secret key attach a 64-byte signature to a message; anyone who knows the corresponding public key can then verify that the message came from the signer and was not modified. Signatures are deterministic — the same `(secret_key, message)` always produces the same bytes, so signing needs no randomness.
+
+```zig
+// Generate a key pair, or derive one from a 32-byte seed.
+const kp = nacl.sign.keyPair(io);
+
+const message = "attack at dawn";
+
+// Detached signature: 64 bytes, independent of the message.
+var sig: [nacl.sign.signature_length]u8 = undefined;
+nacl.sign.signDetached(&sig, message, &kp.secret_key);
+
+// Anyone with kp.public_key can verify. Returns error.AuthFailed on tampering.
+try nacl.sign.verifyDetached(&sig, message, &kp.public_key);
+```
+
+The secret key is 64 bytes (the 32-byte seed followed by the 32-byte public key — the layout TweetNaCl uses); the public key and signature are 32 and 64 bytes. `signDetached` / `verifyDetached` separate the signature from the message; `sign` / `open` produce and consume the NaCl-style "signed message" form — a 64-byte signature concatenated with the plaintext — in one call. Output is byte-for-byte identical to TweetNaCl, tweetnacl-js, and `std.crypto.sign.Ed25519`.
 
 ### lowlevel — stream cipher and MAC
 
@@ -141,6 +162,7 @@ The [`examples/`](examples/) directory has complete, commented programs:
 | `secretbox_demo` | `zig build secretbox_demo` | Authenticated encryption: seal, open, and tamper detection |
 | `box_demo` | `zig build box_demo` | Public-key authenticated encryption between two key pairs |
 | `hash_demo` | `zig build hash_demo` | SHA-512 digest of a message |
+| `sign_demo` | `zig build sign_demo` | Ed25519 detached sign and verify, with tamper detection |
 | `xsalsa20_demo` | `zig build xsalsa20_demo` | XSalsa20 stream-cipher encrypt → decrypt round-trip |
 | `salsa20_demo` | `zig build salsa20_demo` | Salsa20 core block + HSalsa20 subkey derivation |
 
@@ -170,7 +192,7 @@ zig test src/salsa20.zig --test-filter "round-trip"
 - [x] Curve25519 (X25519) scalar multiplication
 - [x] `box` — Curve25519-XSalsa20-Poly1305 public-key encryption
 - [x] `hash` — SHA-512
-- [ ] `sign` — Ed25519 signatures
+- [x] `sign` — Ed25519 signatures
 - [ ] First tagged release
 
 ## Design and contributing
