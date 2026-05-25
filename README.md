@@ -6,7 +6,7 @@
 
 A minimal, auditable Zig port of [TweetNaCl](https://tweetnacl.cr.yp.to/) — Bernstein's compact cryptographic library — targeting **wire compatibility** with [tweetnacl-js](https://github.com/dchest/tweetnacl-js).
 
-> ⚠️ **Early stage.** Authenticated encryption (`secretbox` and `box`), the Salsa20 family, Poly1305 and X25519 are implemented and verified; signatures and hashing are still to come. The API will change as more primitives land, and the library has not been audited — do not use it in production yet.
+> ⚠️ **Early stage.** Authenticated encryption (`secretbox` and `box`), SHA-512 hashing, the Salsa20 family, Poly1305 and X25519 are implemented and verified; signatures are still to come. The API will change as more primitives land, and the library has not been audited — do not use it in production yet.
 
 ## Why this exists
 
@@ -24,12 +24,13 @@ If you need vetted cryptography in production today, reach for `std.crypto`.
 |---|---|---|
 | `secretbox` — XSalsa20-Poly1305 | High-level authenticated encryption | ✅ |
 | `box` — Curve25519-XSalsa20-Poly1305 | High-level public-key authenticated encryption | ✅ |
+| `hash` — SHA-512 | High-level hash function | ✅ |
 | `lowlevel.salsa20` — core / HSalsa20 / stream | Low-level building block | ✅ |
 | `lowlevel.xsalsa20` — stream | Low-level building block | ✅ |
 | `lowlevel.poly1305` — one-time MAC | Low-level building block | ✅ |
 | `lowlevel.scalarmult` — Curve25519 / X25519 | Low-level building block | ✅ |
 
-`secretbox` and `box` are the APIs most applications should use. The `lowlevel` primitives are building blocks; everything is verified against `std.crypto` and published test vectors. Signatures (`sign`) and hashing (`hash`) are on the [roadmap](#roadmap).
+`secretbox` and `box` are the APIs most applications should use. The `lowlevel` primitives are building blocks; everything is verified against `std.crypto` and published test vectors. Signatures (`sign`) are on the [roadmap](#roadmap).
 
 ## Installation
 
@@ -105,6 +106,19 @@ try nacl.box.open(&opened, &boxed, &nonce, &alice.public_key, &bob.secret_key);
 
 `box.keyPair(io)` draws a fresh secret key from `io`'s CSPRNG (`io` is a `std.Io`); `box.keyPairFromSecretKey(&sk)` derives a key pair deterministically from an existing 32-byte secret key. When several messages travel between the same pair of keys, derive the shared key once with `box.beforenm` and reuse it via `box.sealAfternm` / `box.openAfternm` — this skips the X25519 scalar multiplication on every message. `beforenm`, `seal` and `open` return `error.WeakPublicKey` if a supplied public key is a low-order Curve25519 point (which would collapse the shared key to a fixed, publicly-known value). Output is byte-for-byte identical to TweetNaCl / tweetnacl-js.
 
+### hash — SHA-512
+
+`hash` computes a 64-byte SHA-512 digest of a message. It takes no key, so there is nothing to verify and no round-trip — just a one-shot digest.
+
+```zig
+const message = "attack at dawn";
+
+var digest: [nacl.hash.digest_length]u8 = undefined; // digest_length == 64
+nacl.hash.hash(&digest, message);
+```
+
+The message is a slice of any length; the digest is a caller-allocated 64-byte array. Output is byte-for-byte identical to TweetNaCl / tweetnacl-js (`crypto_hash`) and to any other SHA-512 implementation.
+
 ### lowlevel — stream cipher and MAC
 
 When you need the raw primitives, they live under `nacl.lowlevel`. The XSalsa20 stream cipher XORs a message with a keystream; it is symmetric, so the *same call* encrypts and decrypts:
@@ -126,6 +140,7 @@ The [`examples/`](examples/) directory has complete, commented programs:
 |---|---|---|
 | `secretbox_demo` | `zig build secretbox_demo` | Authenticated encryption: seal, open, and tamper detection |
 | `box_demo` | `zig build box_demo` | Public-key authenticated encryption between two key pairs |
+| `hash_demo` | `zig build hash_demo` | SHA-512 digest of a message |
 | `xsalsa20_demo` | `zig build xsalsa20_demo` | XSalsa20 stream-cipher encrypt → decrypt round-trip |
 | `salsa20_demo` | `zig build salsa20_demo` | Salsa20 core block + HSalsa20 subkey derivation |
 
@@ -154,7 +169,7 @@ zig test src/salsa20.zig --test-filter "round-trip"
 - [x] `secretbox` — XSalsa20-Poly1305 authenticated encryption
 - [x] Curve25519 (X25519) scalar multiplication
 - [x] `box` — Curve25519-XSalsa20-Poly1305 public-key encryption
-- [ ] SHA-512 hashing
+- [x] `hash` — SHA-512
 - [ ] `sign` — Ed25519 signatures
 - [ ] First tagged release
 
