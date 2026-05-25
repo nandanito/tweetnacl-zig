@@ -74,6 +74,11 @@ A primitive is not "done" until it has all of:
   length/content mismatch — this exact mistake hid a real bug in the project's
   first commits.
 - Cite the source of every vector in a comment (e.g. `// NaCl tests/core1.c`).
+- When a KAT fails but the differential test against `std.crypto` passes at
+  the same input size, trust the audited oracle and suspect the KAT — the
+  expected byte array is probably miscopied. Paste the digest from the test
+  output back into the array and re-run. (The SHA-512 §C.2 vector caught
+  exactly this mistake on its way in.)
 
 ### Differential testing
 

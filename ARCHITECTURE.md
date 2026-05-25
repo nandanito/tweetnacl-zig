@@ -21,8 +21,8 @@ implementation suitable for study and audit. Consequently:
 |-------------|--------------------------------------------------------|----------|
 | `secretbox` | XSalsa20-Poly1305 authenticated encryption (symmetric) | ✅       |
 | `box`       | Curve25519-XSalsa20-Poly1305 authenticated encryption (public-key) | ✅       |
+| `hash`      | SHA-512                                                | ✅       |
 | `sign`      | Ed25519 signatures                                     | roadmap  |
-| `hash`      | SHA-512                                                | roadmap  |
 
 **Low-level API** (`lowlevel`) — building blocks for advanced use:
 
@@ -67,8 +67,10 @@ These rules are binding for every primitive:
    comparison uses `std.crypto.timing_safe`.
 6. **Secret hygiene** — stack-resident secret material (subkeys, expanded keys,
    keystream state) is wiped with `std.crypto.secureZero` before return.
-7. **Explicit endianness** — all integer encoding is little-endian via
-   `std.mem.readInt` / `writeInt`.
+7. **Explicit endianness** — integer encoding goes through `std.mem.readInt` /
+   `writeInt` with the byte order named at the call site. The NaCl primitives
+   are little-endian; SHA-512 (`hash`) is big-endian, as its specification
+   requires.
 8. **No `assert` for validation** — `std.debug.assert` is only a debug aid (it
    is compiled out in release builds); input contracts are enforced by the type
    system or an error union.
@@ -92,6 +94,7 @@ src/
   root.zig       Public API surface (secretbox + box + lowlevel)
   secretbox.zig  XSalsa20-Poly1305 authenticated encryption
   box.zig        Curve25519-XSalsa20-Poly1305 public-key authenticated encryption
+  hash.zig       SHA-512
   lowlevel.zig   Aggregator for the low-level namespace
   salsa20.zig    Salsa20 / HSalsa20 core + Salsa20 stream cipher
   xsalsa20.zig   XSalsa20 stream cipher
