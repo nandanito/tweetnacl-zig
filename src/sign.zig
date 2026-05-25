@@ -259,6 +259,13 @@ fn pointSelect(p: *Point, q: *Point, bit: u8) void {
     for (0..4) |i| feSelect(&p[i], &q[i], bit);
 }
 
+/// Securely wipes the limbs of a point. Used to clear the secret-dependent
+/// intermediate state left in `pointScalarmult` and the per-signature
+/// extended-coordinate representation of `R` / `A` after they are packed.
+fn pointWipe(p: *Point) void {
+    for (p) |*gf| std.crypto.secureZero(i64, gf);
+}
+
 /// Serialises a point as the 32-byte compressed Edwards encoding: 255 bits of
 /// y, with the sign of x packed into the high bit.
 fn pointPack(out: *[32]u8, p: *const Point) void {
@@ -326,6 +333,10 @@ fn pointUnpackNeg(r: *Point, enc: *const [32]u8) error{InvalidEncoding}!void {
 /// Uses the standard double-and-add ladder with a cswap to hide the bit value.
 fn pointScalarmult(p: *Point, q: *const Point, s: *const [32]u8) void {
     var qmut: Point = q.*;
+    // `qmut` carries the secret-scalar-dependent running accumulator; the bit
+    // pattern of `s` is encoded in its final value. Wipe before returning.
+    defer pointWipe(&qmut);
+
     p[0] = gf_zero;
     p[1] = gf_one;
     p[2] = gf_one;
@@ -482,8 +493,10 @@ pub fn keyPairFromSeed(seed: *const [seed_length]u8) KeyPair {
     d[31] &= 127;
     d[31] |= 64;
 
-    // Public key A = a · B.
+    // Public key A = a · B. `p`'s extended coordinates were computed from the
+    // secret signing scalar; wipe them once the packed encoding is out.
     var p: Point = undefined;
+    defer pointWipe(&p);
     pointScalarbase(&p, d[0..32]);
     pointPack(&kp.public_key, &p);
 
@@ -527,8 +540,11 @@ fn signRaw(sig: *[signature_length]u8, msg: []const u8, secret_key: *const [secr
     }
     reduceModL(&r_hash);
 
-    // R = r · B; write its 32-byte compressed encoding into sig[0..32].
+    // R = r · B; write its 32-byte compressed encoding into sig[0..32]. The
+    // extended coordinates of R were computed from the secret nonce; wipe
+    // them once they have been packed.
     var R: Point = undefined;
+    defer pointWipe(&R);
     pointScalarbase(&R, r_hash[0..32]);
     pointPack(sig[0..32], &R);
 
@@ -560,13 +576,13 @@ fn signRaw(sig: *[signature_length]u8, msg: []const u8, secret_key: *const [secr
 
 /// Attached sign (NaCl form): writes the 64-byte signature followed by
 /// `msg.len` bytes of plaintext to `out`, for a total of `msg.len +
-/// signature_length` bytes.
+/// signature_length` bytes. `out` must be exactly that long — a shorter
+/// slice triggers a slice-bounds panic in safety-checked builds.
 pub fn sign(out: []u8, msg: []const u8, secret_key: *const [secret_key_length]u8) void {
-    std.debug.assert(out.len == msg.len + signature_length);
     var sig: [signature_length]u8 = undefined;
     signRaw(&sig, msg, secret_key);
     @memcpy(out[0..signature_length], &sig);
-    @memcpy(out[signature_length..], msg);
+    @memcpy(out[signature_length..][0..msg.len], msg);
 }
 
 /// Detached sign: writes only the 64-byte signature.
@@ -633,11 +649,12 @@ pub fn open(
 ) error{AuthFailed}!void {
     if (signed.len < signature_length) return error.AuthFailed;
     const msg = signed[signature_length..];
-    std.debug.assert(out.len == msg.len);
 
     const sig: *const [signature_length]u8 = signed[0..signature_length];
     try verifyDetached(sig, msg, public_key);
-    @memcpy(out, msg);
+    // `out` must have length `signed.len - signature_length`; a shorter
+    // slice triggers a slice-bounds panic in safety-checked builds.
+    @memcpy(out[0..msg.len], msg);
 }
 
 // ---------------------------------------------------------------------------
