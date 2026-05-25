@@ -402,6 +402,57 @@ fn reduceModL(r: *[64]u8) void {
 }
 
 // ---------------------------------------------------------------------------
+// Verification hardening: reject malleable signatures and pathological keys.
+// ---------------------------------------------------------------------------
+
+/// Returns true iff `s` (a 32-byte little-endian integer) is strictly less
+/// than the group order L. RFC 8032 §5.1.7 requires this on verification —
+/// without it, an attacker can produce a different-but-verifying signature
+/// by adding L to the S half (since `(S + L)·B = S·B + L·B = S·B`).
+///
+/// `s` is part of the public signature, but the comparison is written
+/// constant-time anyway to match the project's convention.
+fn scalarBelowL(s: *const [32]u8) bool {
+    // Compute (L - 1) - s byte by byte and watch the final borrow.
+    // The "- 1" is folded in as the initial borrow; if the chain finishes
+    // with no outstanding borrow, then s ≤ L-1, i.e., s < L.
+    var borrow: i32 = 1;
+    var i: usize = 0;
+    while (i < 32) : (i += 1) {
+        const d: i32 = @as(i32, L[i]) - @as(i32, s[i]) - borrow;
+        // d ∈ [-256, 255]; an arithmetic right shift of a negative i32
+        // yields all-ones, so the bit-0 mask recovers a clean 0/1 flag.
+        borrow = (d >> 31) & 1;
+    }
+    return borrow == 0;
+}
+
+/// Returns true iff `p` lies in the 8-torsion subgroup of Ed25519 — i.e., the
+/// order of `p` divides 8 (it is identity, an order-2, order-4 or order-8
+/// point). Detected by computing `[8]p` and comparing against the identity's
+/// compressed encoding `01 00 ... 00`.
+///
+/// A public key sitting wholly in this subgroup admits a trivial forgery:
+/// for `pk = identity` the equation `S·B = R + h·A` collapses to `R = S·B`,
+/// which the attacker satisfies with `R = identity, S = 0` regardless of the
+/// message. The other seven torsion points are exploitable too (with more
+/// work), so the only safe option is to reject the whole subgroup.
+fn pointIsSmallOrder(p: *const Point) bool {
+    // The Hisil et al. addition formula in `pointAdd` is unified — passing
+    // the same point as both arguments correctly doubles it.
+    var q: Point = p.*;
+    pointAdd(&q, &q); // 2·p
+    pointAdd(&q, &q); // 4·p
+    pointAdd(&q, &q); // 8·p
+
+    var enc: [32]u8 = undefined;
+    pointPack(&enc, &q);
+    var diff: u8 = enc[0] ^ 0x01;
+    for (1..32) |i| diff |= enc[i];
+    return diff == 0;
+}
+
+// ---------------------------------------------------------------------------
 // Public API.
 // ---------------------------------------------------------------------------
 
@@ -524,15 +575,25 @@ pub fn signDetached(sig: *[signature_length]u8, msg: []const u8, secret_key: *co
 }
 
 /// Verifies a 64-byte detached signature against `msg` and `public_key`.
-/// Returns `error.AuthFailed` if the signature does not authenticate.
+/// Returns `error.AuthFailed` if the signature does not authenticate, the
+/// signature's S half is non-canonical (S ≥ L), or `public_key` lies in the
+/// 8-torsion subgroup (and so admits trivial forgeries).
 pub fn verifyDetached(
     sig: *const [signature_length]u8,
     msg: []const u8,
     public_key: *const [public_key_length]u8,
 ) error{AuthFailed}!void {
+    // RFC 8032 §5.1.7 step 1: reject non-canonical S (signature malleability).
+    // Cheaper than decoding the public key, so check it first.
+    if (!scalarBelowL(sig[32..64])) return error.AuthFailed;
+
     // Decompress -A; an invalid public key cannot authenticate any message.
     var neg_a: Point = undefined;
     pointUnpackNeg(&neg_a, public_key) catch return error.AuthFailed;
+
+    // Reject small-order public keys outright — they admit forgeries against
+    // any message (`pointIsSmallOrder` for the rationale).
+    if (pointIsSmallOrder(&neg_a)) return error.AuthFailed;
 
     // h = SHA-512(R || A || msg), reduced mod L.
     var h: [64]u8 = undefined;
@@ -807,6 +868,63 @@ test "Ed25519 verifyDetached rejects forgeries" {
         // which surfaces as error.AuthFailed.
         const bad_pk = [_]u8{0xff} ** 32;
         try testing.expectError(error.AuthFailed, verifyDetached(&sig, &msg, &bad_pk));
+    }
+}
+
+test "Ed25519 verifyDetached rejects non-canonical S (S >= L)" {
+    // RFC 8032 §5.1.7 step 1: a signature with `S >= L` is malleable — adding
+    // the group order to S yields a different 64-byte signature that maps to
+    // the same `S·B` and therefore satisfies the verification equation. The
+    // S < L check in verifyDetached must reject this.
+    var prng = std.Random.DefaultPrng.init(0x5_a1_a_b13_ed25519);
+    const rand = prng.random();
+    var seed: [32]u8 = undefined;
+    var msg: [64]u8 = undefined;
+    rand.bytes(&seed);
+    rand.bytes(&msg);
+    const kp = keyPairFromSeed(&seed);
+
+    var sig: [signature_length]u8 = undefined;
+    signDetached(&sig, &msg, &kp.secret_key);
+    try verifyDetached(&sig, &msg, &kp.public_key); // canonical signature still verifies
+
+    // S' = S + L, little-endian byte-by-byte. L < 2^253 and S < L, so S + L
+    // < 2^254 — the sum always fits in 32 bytes and never wraps.
+    var malleable = sig;
+    var carry: u16 = 0;
+    for (0..32) |i| {
+        const sum: u16 = @as(u16, malleable[32 + i]) + @as(u16, L[i]) + carry;
+        malleable[32 + i] = @intCast(sum & 0xff);
+        carry = sum >> 8;
+    }
+    try testing.expectEqual(@as(u16, 0), carry);
+    try testing.expect(!std.mem.eql(u8, sig[32..64], malleable[32..64])); // it really is a different S
+
+    try testing.expectError(error.AuthFailed, verifyDetached(&malleable, &msg, &kp.public_key));
+}
+
+test "Ed25519 verifyDetached rejects small-order public keys" {
+    // For `pk = identity` (the encoding `01 00..00`), the verification
+    // equation `S·B = R + h·A` collapses to `S·B = R`, which the attacker
+    // satisfies trivially with `R = identity, S = 0` regardless of the
+    // message. The other 7 torsion points are exploitable too (with more
+    // work), so verifyDetached rejects the whole 8-torsion subgroup.
+    const small_order_pks = [_][32]u8{
+        // Identity, order 1.
+        [_]u8{1} ++ [_]u8{0} ** 31,
+        // (0, p-1), order 2. y = -1 little-endian, sign bit on x is 0.
+        [_]u8{0xec} ++ [_]u8{0xff} ** 30 ++ [_]u8{0x7f},
+    };
+    // The trivial forgery against pk = identity. It is a structurally valid
+    // 64-byte signature (`R = identity`, `S = 0`) — pre-fix, it verified any
+    // message under `pk = identity`. With the small-order check in place,
+    // verifyDetached must reject every small-order pk regardless of signature.
+    const trivial_forgery: [signature_length]u8 =
+        ([_]u8{1} ++ [_]u8{0} ** 31) ++ ([_]u8{0} ** 32);
+    const msg = "small-order public keys must be rejected";
+
+    for (small_order_pks) |pk| {
+        try testing.expectError(error.AuthFailed, verifyDetached(&trivial_forgery, msg, &pk));
     }
 }
 
