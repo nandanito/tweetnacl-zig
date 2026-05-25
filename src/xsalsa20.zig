@@ -6,12 +6,12 @@ const std = @import("std");
 const salsa20 = @import("salsa20.zig");
 
 /// XSalsa20 stream cipher: XORs `msg` with the keystream produced from a
-/// 24-byte nonce and a 32-byte key, writing `msg.len` bytes to `out`.
+/// 24-byte nonce and a 32-byte key, writing `msg.len` bytes to `out`. `out`
+/// must be at least `msg.len` bytes long — a shorter slice triggers a
+/// slice-bounds panic in safety-checked builds.
 ///
 /// The same call decrypts. Provides confidentiality only — no authentication.
 pub fn stream(out: []u8, msg: []const u8, nonce: *const [24]u8, key: *const [32]u8) void {
-    std.debug.assert(out.len == msg.len);
-
     // Derive a subkey from the first 16 nonce bytes via HSalsa20...
     var subkey: [32]u8 = undefined;
     defer std.crypto.secureZero(u8, &subkey);

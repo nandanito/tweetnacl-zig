@@ -90,12 +90,12 @@ pub fn hsalsa20(out: *[32]u8, input: *const [16]u8, key: *const [32]u8) void {
 }
 
 /// Salsa20 stream cipher: XORs `msg` with the keystream produced from an
-/// 8-byte nonce and a 32-byte key, writing `msg.len` bytes to `out`.
+/// 8-byte nonce and a 32-byte key, writing `msg.len` bytes to `out`. `out`
+/// must be at least `msg.len` bytes long — a shorter slice triggers a
+/// slice-bounds panic in safety-checked builds.
 ///
 /// The same call decrypts. Provides confidentiality only — no authentication.
 pub fn stream(out: []u8, msg: []const u8, nonce: *const [8]u8, key: *const [32]u8) void {
-    std.debug.assert(out.len == msg.len);
-
     // Salsa20 input block: 8-byte nonce ++ 64-bit little-endian block counter.
     var input: [16]u8 = undefined;
     @memcpy(input[0..8], nonce);

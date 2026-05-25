@@ -46,12 +46,13 @@ fn beginKeystream(nonce: *const [nonce_length]u8, key: *const [key_length]u8) Ke
     return ks;
 }
 
-/// XORs `src` into `dst` with the keystream. The message keystream begins at
-/// byte 32 — block 0's first 32 bytes are reserved for the Poly1305 key.
-/// Symmetric: this both encrypts and decrypts.
+/// XORs `src` into `dst` with the keystream, writing `src.len` bytes.
+/// `dst` must be at least `src.len` long — the slice indexing inside is the
+/// length contract, and a short `dst` triggers a slice-bounds panic in
+/// safety-checked builds. The message keystream begins at byte 32 — block
+/// 0's first 32 bytes are reserved for the Poly1305 key. Symmetric: this
+/// both encrypts and decrypts.
 fn xorMessage(ks: *Keystream, dst: []u8, src: []const u8) void {
-    std.debug.assert(dst.len == src.len);
-
     // First (up to) 32 bytes: the second half of keystream block 0.
     const head = @min(@as(usize, 32), src.len);
     for (0..head) |i| dst[i] = src[i] ^ ks.block0[32 + i];
@@ -73,19 +74,19 @@ fn xorMessage(ks: *Keystream, dst: []u8, src: []const u8) void {
 }
 
 /// Encrypts and authenticates `msg`, writing `msg.len + overhead` bytes to
-/// `out`: a 16-byte tag followed by the ciphertext.
+/// `out`: a 16-byte tag followed by the ciphertext. `out` must be exactly
+/// that long — a shorter slice triggers a slice-bounds panic in
+/// safety-checked builds.
 pub fn seal(
     out: []u8,
     msg: []const u8,
     nonce: *const [nonce_length]u8,
     key: *const [key_length]u8,
 ) void {
-    std.debug.assert(out.len == msg.len + overhead);
-
     var ks = beginKeystream(nonce, key);
     defer ks.wipe();
 
-    const ciphertext = out[overhead..];
+    const ciphertext = out[overhead..][0..msg.len];
     xorMessage(&ks, ciphertext, msg);
     poly1305.auth(out[0..overhead], ciphertext, ks.polyKey());
 }
@@ -103,14 +104,15 @@ pub fn open(
 ) error{AuthFailed}!void {
     if (boxed.len < overhead) return error.AuthFailed;
     const ciphertext = boxed[overhead..];
-    std.debug.assert(out.len == ciphertext.len);
 
     var ks = beginKeystream(nonce, key);
     defer ks.wipe();
 
     // Authenticate before releasing any plaintext.
     try poly1305.verify(boxed[0..overhead], ciphertext, ks.polyKey());
-    xorMessage(&ks, out, ciphertext);
+    // `out` must have length `boxed.len - overhead`; a shorter slice
+    // triggers a slice-bounds panic in safety-checked builds.
+    xorMessage(&ks, out[0..ciphertext.len], ciphertext);
 }
 
 // ---------------------------------------------------------------------------
