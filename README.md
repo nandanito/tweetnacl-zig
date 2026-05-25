@@ -1,12 +1,13 @@
 # TweetNaCl-Zig
 
 [![CI](https://github.com/nandanito/tweetnacl-zig/actions/workflows/ci.yml/badge.svg)](https://github.com/nandanito/tweetnacl-zig/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/nandanito/tweetnacl-zig)](https://github.com/nandanito/tweetnacl-zig/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Zig](https://img.shields.io/badge/Zig-0.16.0-orange)](https://ziglang.org/)
 
 A minimal, auditable Zig port of [TweetNaCl](https://tweetnacl.cr.yp.to/) — Bernstein's compact cryptographic library — targeting **wire compatibility** with [tweetnacl-js](https://github.com/dchest/tweetnacl-js).
 
-> ⚠️ **Early stage.** Authenticated encryption (`secretbox` and `box`), SHA-512 hashing, Ed25519 signatures (`sign`), the Salsa20 family, Poly1305 and X25519 are all implemented and verified. The library has not been audited — do not use it in production yet.
+> ⚠️ **Unaudited.** [v0.3.0](https://github.com/nandanito/tweetnacl-zig/releases/tag/v0.3.0) is the first tagged release: `secretbox`, `box`, SHA-512 (`hash`), Ed25519 (`sign`), and the underlying Salsa20 family, Poly1305 and X25519 are implemented, differentially tested against `std.crypto`, and hardened for constant-time behaviour and stack-secret wiping. The library has not been audited — do not use it in production yet.
 
 ## Why this exists
 
@@ -193,7 +194,8 @@ zig test src/salsa20.zig --test-filter "round-trip"
 - [x] `box` — Curve25519-XSalsa20-Poly1305 public-key encryption
 - [x] `hash` — SHA-512
 - [x] `sign` — Ed25519 signatures
-- [ ] First tagged release
+- [x] Constant-time & secret-hygiene hardening sweep
+- [x] First tagged release — [v0.3.0](https://github.com/nandanito/tweetnacl-zig/releases/tag/v0.3.0)
 
 ## Design and contributing
 
